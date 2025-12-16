@@ -40,7 +40,7 @@ pub fn legacy_login(op_legacy_item_id: Option<&str>) -> BTreeMap<String, SecretS
             let key = parts[1].split('=').next().unwrap();
             let value = parts[1].split('=').last().unwrap().trim_matches('"');
 
-            env_vars.insert(key.to_string(), SecretString::new(value.to_string()));
+            env_vars.insert(key.to_string(), SecretString::new(value.into()));
         }
     }
     env_vars
