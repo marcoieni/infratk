@@ -2,7 +2,16 @@ use camino::{Utf8Path, Utf8PathBuf};
 use tracing::debug;
 
 use crate::{
-    args::UpgradeArgs, aws, clipboard, cmd_runner::{CmdRunner, PlanOutcome}, config::Config, dir, envirnoment::assert_aws_env_is_not_set, git, graph::ModulesGraph, grouped_dirs::GroupedDirs, pretty_format, select
+    args::UpgradeArgs,
+    aws, clipboard,
+    cmd_runner::{CmdRunner, PlanOutcome},
+    config::Config,
+    dir,
+    envirnoment::assert_aws_env_is_not_set,
+    git,
+    graph::ModulesGraph,
+    grouped_dirs::GroupedDirs,
+    pretty_format, select,
 };
 
 pub fn upgrade(args: UpgradeArgs, config: &Config) {

@@ -6,14 +6,14 @@ mod cmd_runner;
 mod command;
 mod config;
 mod dir;
+mod envirnoment;
 mod git;
+mod graph;
 mod grouped_dirs;
 mod log;
+mod pretty_format;
 mod provider;
 mod select;
-mod pretty_format;
-mod graph;
-mod envirnoment;
 
 use args::CliArgs;
 use clap::Parser as _;
