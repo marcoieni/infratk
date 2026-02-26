@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use inquire::Select;
 
@@ -8,11 +6,10 @@ use crate::{
     dir::current_dir_is_simpleinfra, graph,
 };
 
-const LEGACY_AWS_ENV_VARS: [&str; 4] = [
+const LEGACY_AWS_ENV_VARS: [&str; 3] = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
-    "AWS_SECURITY_TOKEN",
 ];
 
 pub fn cd(config: &Config) {
