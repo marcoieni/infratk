@@ -14,27 +14,27 @@ use crate::{
     pretty_format, LOCKFILE,
 };
 
-pub fn plan_pr(args: PlanPr, config: &Config) {
+pub fn plan_pr(args: &PlanPr, config: &Config) {
     assert!(current_dir_is_simpleinfra());
     assert_current_branch_is_same_as_pr(&args.pr);
-    let files_changed = get_files_changes(args.pr);
-    println!("Files changed in PR: {:?}", files_changed);
-    let lock_files = get_lock_files(files_changed);
-    println!("Lock files changed in PR: {:?}", lock_files);
+    let files_changed = get_files_changes(&args.pr);
+    println!("Files changed in PR: {files_changed:?}");
+    let lock_files = get_lock_files(&files_changed);
+    println!("Lock files changed in PR: {lock_files:?}");
     let directories: Vec<&Utf8Path> = lock_files
         .iter()
         .map(|file| file.parent().unwrap())
         .collect();
-    let output = plan_directories(directories, config);
+    let output = plan_directories(&directories, config);
     let output_str = pretty_format::format_output(output);
     println!("{output_str}");
     if args.clipboard {
-        clipboard::copy_to_clipboard(output_str);
+        clipboard::copy_to_clipboard(&output_str);
     }
 }
 
 fn plan_directories(
-    directories: Vec<&Utf8Path>,
+    directories: &[&Utf8Path],
     config: &Config,
 ) -> Vec<(Utf8PathBuf, PlanOutcome)> {
     let grouped_dirs = GroupedDirs::new(directories);
@@ -62,14 +62,6 @@ where
     T: AsRef<Utf8Path>,
     U: AsRef<Utf8Path>,
 {
-    let terraform_dirs = terraform_dirs
-        .iter()
-        .map(|d| d.as_ref())
-        .collect::<Vec<_>>();
-    let terragrunt_dirs = terragrunt_dirs
-        .iter()
-        .map(|d| d.as_ref())
-        .collect::<Vec<_>>();
     // logout before login, to avoid issues with multiple profiles
     aws::sso_logout();
     let login_env_vars = aws::legacy_login(config.op_legacy_item_id.as_deref());
@@ -77,10 +69,12 @@ where
 
     let mut output = vec![];
     for d in terraform_dirs {
+        let d = d.as_ref();
         let o = cmd_runner.terraform_plan(d);
         output.push((d.to_path_buf(), o));
     }
     for d in terragrunt_dirs {
+        let d = d.as_ref();
         let o = cmd_runner.terragrunt_plan(d);
         output.push((d.to_path_buf(), o));
     }
@@ -109,8 +103,8 @@ where
     outcome
 }
 
-fn get_files_changes(pr: String) -> Vec<Utf8PathBuf> {
-    Cmd::new("gh", ["pr", "diff", &pr, "--name-only"])
+fn get_files_changes(pr: &str) -> Vec<Utf8PathBuf> {
+    Cmd::new("gh", ["pr", "diff", pr, "--name-only"])
         .hide_stdout()
         .run()
         .stdout()
@@ -119,7 +113,7 @@ fn get_files_changes(pr: String) -> Vec<Utf8PathBuf> {
         .collect()
 }
 
-fn get_lock_files(files: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
+fn get_lock_files(files: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
     files
         .iter()
         .filter(|file| file.file_name() == Some(LOCKFILE))
@@ -139,7 +133,7 @@ mod tests {
             Utf8PathBuf::from("module1/.terraform.lock.hcl"),
             Utf8PathBuf::from("module2/.terraform.lock.hcl"),
         ];
-        let lock_files = get_lock_files(files);
+        let lock_files = get_lock_files(&files);
         assert_eq!(
             lock_files,
             vec![

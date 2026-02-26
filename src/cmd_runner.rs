@@ -55,18 +55,18 @@ impl CmdRunner {
             }
             .to_string();
             if output.status().code().unwrap() == 1 {
-                plan_details.push_str(output.stderr())
+                plan_details.push_str(output.stderr());
             }
             PlanOutcome::Changes(plan_details)
         }
     }
 
     pub fn terragrunt_init_upgrade(&self, directory: &Utf8Path) {
-        self.init_upgrade(directory, "terragrunt")
+        self.init_upgrade(directory, "terragrunt");
     }
 
     pub fn terraform_init_upgrade(&self, directory: &Utf8Path) {
-        self.init_upgrade(directory, "terraform")
+        self.init_upgrade(directory, "terraform");
     }
 
     fn init_upgrade(&self, directory: &Utf8Path, command: &str) {

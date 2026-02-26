@@ -15,7 +15,7 @@ async fn get_latest_version(provider: &str) -> anyhow::Result<Version> {
         published_at: String,
     }
 
-    let url = format!("https://registry.terraform.io/v1/providers/{}", provider);
+    let url = format!("https://registry.terraform.io/v1/providers/{provider}");
     let response: ProviderJson = reqwest::get(&url).await?.json().await?;
 
     let version = semver::Version::parse(&response.version)?;
