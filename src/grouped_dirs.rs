@@ -19,7 +19,7 @@ pub struct GroupedDirs {
 }
 
 impl GroupedDirs {
-    pub fn new<T>(directories: Vec<T>) -> Self
+    pub fn new<T>(directories: &[T]) -> Self
     where
         T: AsRef<Utf8Path>,
     {
@@ -134,14 +134,6 @@ where
     T: AsRef<Utf8Path>,
     U: AsRef<Utf8Path>,
 {
-    let terraform_dirs = terraform_dirs
-        .iter()
-        .map(|d| d.as_ref())
-        .collect::<Vec<_>>();
-    let terragrunt_dirs = terragrunt_dirs
-        .iter()
-        .map(|d| d.as_ref())
-        .collect::<Vec<_>>();
     // logout before login, to avoid issues with multiple profiles
     aws::sso_logout();
     let login_env_vars = aws::legacy_login(config.op_legacy_item_id.as_deref());
@@ -149,11 +141,13 @@ where
 
     let mut outcome = vec![];
     for d in terraform_dirs {
+        let d = d.as_ref();
         cmd_runner.terraform_init_upgrade(d);
         let plan_outcome = cmd_runner.terraform_plan(d);
         outcome.push((d.to_path_buf(), plan_outcome));
     }
     for d in terragrunt_dirs {
+        let d = d.as_ref();
         cmd_runner.terragrunt_init_upgrade(d);
         let plan_outcome = cmd_runner.terragrunt_plan(d);
         outcome.push((d.to_path_buf(), plan_outcome));

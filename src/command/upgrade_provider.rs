@@ -23,10 +23,10 @@ pub async fn upgrade_provider(config: &Config) {
     let providers_list = outdated_providers.providers.keys().cloned().collect();
     let selected_providers = select_providers(providers_list);
 
-    update_lockfiles(&outdated_providers, selected_providers, config);
+    update_lockfiles(&outdated_providers, &selected_providers, config);
 }
 
-fn update_lockfiles(providers: &Providers, selected_providers: Vec<String>, config: &Config) {
+fn update_lockfiles(providers: &Providers, selected_providers: &[String], config: &Config) {
     // Filter out the providers that were not selected
     let filtered_providers = providers
         .providers
@@ -37,16 +37,16 @@ fn update_lockfiles(providers: &Providers, selected_providers: Vec<String>, conf
     let all_dirs: Vec<Utf8PathBuf> = filtered_providers
         .values()
         .flat_map(|v| v.versions.values())
-        .flat_map(|paths| get_parents(paths.clone()))
+        .flat_map(|paths| get_parents(paths))
         .collect();
 
-    let grouped_dirs = grouped_dirs::GroupedDirs::new(all_dirs);
+    let grouped_dirs = grouped_dirs::GroupedDirs::new(&all_dirs);
 
     let outcome = grouped_dirs.upgrade_all(config);
     pretty_format::format_output(outcome);
 }
 
-fn get_parents(paths: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
+fn get_parents(paths: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
     paths
         .iter()
         .map(|p| p.parent().unwrap().to_path_buf())

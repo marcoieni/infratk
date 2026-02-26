@@ -77,7 +77,7 @@ impl Cmd {
         let mut command = Command::new(&self.name);
         if let Some(dir) = &self.current_dir {
             command.current_dir(dir);
-            to_print.push_str(&format!(" 👉 {}", dir));
+            to_print.push_str(&format!(" 👉 {dir}"));
         }
         for (key, value) in &self.env_vars {
             command.env(key, value.expose_secret());
@@ -119,12 +119,12 @@ impl Cmd {
         for (line, is_stdout) in rx {
             if is_stdout {
                 if !self.hide_stdout {
-                    println!("{}", line);
+                    println!("{line}");
                 }
                 output_stdout.push_str(&line);
                 output_stdout.push('\n');
             } else {
-                eprintln!("{}", line);
+                eprintln!("{line}");
                 output_stderr.push_str(&line);
                 output_stderr.push('\n');
             }
