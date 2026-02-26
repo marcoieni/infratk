@@ -8,6 +8,7 @@ use crate::{
     command::legacy_login::login_to_legacy_aws_account,
     config::Config,
     dir::{self, current_dir_is_simpleinfra},
+    graph,
 };
 
 const LEGACY_AWS_ENV_VARS: [&str; 4] = [
@@ -46,18 +47,7 @@ fn unset_legacy_env_vars() {
 
 fn list_modules() -> Vec<Utf8PathBuf> {
     let mut modules = BTreeSet::new();
-    let walker = ignore::WalkBuilder::new(dir::current_dir())
-        .hidden(false)
-        .build();
-
-    for entry in walker {
-        let entry = entry.expect("invalid entry");
-        let file_type = entry.file_type().expect("unknown file type");
-        if file_type.is_dir() {
-            continue;
-        }
-
-        let path = Utf8PathBuf::from_path_buf(entry.path().to_path_buf()).unwrap();
+    for path in graph::get_all_tf_and_hcl_files() {
         if is_path_ignored(&path) {
             continue;
         }
