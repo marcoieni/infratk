@@ -22,9 +22,14 @@ pub fn legacy_login(op_legacy_item_id: Option<&str>) -> BTreeMap<String, SecretS
     let git_root = git::git_root(&repo);
     let mut env_vars = BTreeMap::new();
     let mut cred_cmd = Cmd::new("python3", ["./aws-creds.py"]);
-    cred_cmd.hide_stdout().with_current_dir(git_root);
+    cred_cmd
+        .hide_command()
+        .hide_stdout()
+        .with_current_dir(git_root);
     if let Some(op_legacy_item_id) = op_legacy_item_id {
-        let totp_code_output = Cmd::new("op", ["item", "get", op_legacy_item_id, "--otp"]).run();
+        let mut totp_cmd = Cmd::new("op", ["item", "get", op_legacy_item_id, "--otp"]);
+        totp_cmd.hide_command().hide_stdout();
+        let totp_code_output = totp_cmd.run();
         assert!(totp_code_output.status().success());
         let totp_code = totp_code_output.stdout().trim().to_string();
         cred_cmd.with_env_vars([("TOTP_CODE".to_string(), totp_code.into())].into());
@@ -35,13 +40,14 @@ pub fn legacy_login(op_legacy_item_id: Option<&str>) -> BTreeMap<String, SecretS
         "failed to login to legacy account"
     );
     for line in outcome.stdout().lines() {
-        if line.contains("export") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            let key = parts[1].split('=').next().unwrap();
-            let value = parts[1].split('=').next_back().unwrap().trim_matches('"');
-
-            env_vars.insert(key.to_string(), SecretString::new(value.into()));
-        }
+        let Some(line) = line.trim().strip_prefix("export ") else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        env_vars.insert(key.to_string(), SecretString::new(value.into()));
     }
     env_vars
 }

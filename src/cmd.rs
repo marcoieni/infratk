@@ -36,6 +36,7 @@ pub struct Cmd {
     args: Vec<String>,
     current_dir: Option<Utf8PathBuf>,
     hide_stdout: bool,
+    hide_command: bool,
 }
 
 impl Cmd {
@@ -53,6 +54,7 @@ impl Cmd {
             args,
             current_dir: None,
             hide_stdout: false,
+            hide_command: false,
             env_vars: BTreeMap::new(),
         }
     }
@@ -72,6 +74,11 @@ impl Cmd {
         self
     }
 
+    pub fn hide_command(&mut self) -> &mut Self {
+        self.hide_command = true;
+        self
+    }
+
     pub fn run(&self) -> CmdOutput {
         let mut to_print = format!("🚀 {} {}", self.name, self.args.join(" "));
         let mut command = Command::new(&self.name);
@@ -82,7 +89,9 @@ impl Cmd {
         for (key, value) in &self.env_vars {
             command.env(key, value.expose_secret());
         }
-        println!("{to_print}");
+        if !self.hide_command {
+            println!("{to_print}");
+        }
         let mut child = command
             .args(&self.args)
             .stdout(Stdio::piped())
