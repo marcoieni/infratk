@@ -158,21 +158,29 @@ fn get_dependencies(file: &Utf8Path) -> Vec<Utf8PathBuf> {
 }
 
 pub fn get_all_modules() -> Vec<Utf8PathBuf> {
-    let mut dirs = vec![];
+    // Use BTreeSet for alphabetical order.
+    let mut dirs = BTreeSet::new();
     let current_dir = dir::current_dir();
     let walker = ignore::WalkBuilder::new(current_dir).build();
 
     for entry in walker {
         let entry = entry.expect("invalid entry");
         let file_type = entry.file_type().expect("unknown file type");
-        if !file_type.is_dir()
-            && (entry.path().extension() == Some("tf".as_ref())
-                || entry.path().extension() == Some("hcl".as_ref()))
-        {
-            let path = entry.path().to_path_buf();
-            let utf8path = Utf8PathBuf::from_path_buf(path).unwrap();
-            let stripped_path = dir::get_stripped_parent(&utf8path);
-            dirs.push(stripped_path);
+        if !file_type.is_dir() {
+            let parent = entry.path().parent().expect("file without parent");
+            let utf8_parent = Utf8Path::from_path(parent).expect("invalid utf-8 path");
+            let stripped_parent = dir::strip_current_dir(utf8_parent);
+
+            // Once a module directory was recorded, skip checking more files in it.
+            if dirs.contains(&stripped_parent) {
+                continue;
+            }
+
+            if entry.path().extension() == Some("tf".as_ref())
+                || entry.path().extension() == Some("hcl".as_ref())
+            {
+                dirs.insert(stripped_parent);
+            }
         }
     }
 
@@ -180,7 +188,7 @@ pub fn get_all_modules() -> Vec<Utf8PathBuf> {
         !dirs.is_empty(),
         "no terragrunt/terraform modules found in this repository"
     );
-    dirs
+    dirs.into_iter().collect()
 }
 
 /// Get all the files that might contain a dependency
