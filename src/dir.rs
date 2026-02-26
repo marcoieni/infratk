@@ -15,8 +15,20 @@ pub fn strip_current_dir(path: &Utf8Path) -> Utf8PathBuf {
 }
 
 pub fn current_dir_is_simpleinfra() -> bool {
-    let current_dir = current_dir();
-    current_dir.ends_with("simpleinfra")
+    let output = std::process::Command::new("git")
+        .args(["remote", "-v"])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.lines().any(|line| {
+                line.contains("github.com:rust-lang/simpleinfra")
+                    || line.contains("github.com/rust-lang/simpleinfra")
+            })
+        }
+        _ => false,
+    }
 }
 
 pub fn get_stripped_parent(path: &Utf8PathBuf) -> Utf8PathBuf {
