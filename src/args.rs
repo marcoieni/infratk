@@ -25,6 +25,9 @@ pub enum Command {
     /// To login, use as: `eval "$(infratk legacy-login)"`.
     #[command(visible_alias = "ll")]
     LegacyLogin,
+    /// Select a module and print shell commands to `cd` and login to AWS.
+    /// Use as: `eval "$(infratk cd)"`.
+    Cd,
     /// Get the graph of the terraform modules to see how they depend on each other.
     Graph(GraphArgs),
 }

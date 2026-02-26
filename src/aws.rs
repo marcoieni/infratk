@@ -52,7 +52,40 @@ pub fn legacy_login(op_legacy_item_id: Option<&str>) -> BTreeMap<String, SecretS
     env_vars
 }
 
+fn sso_login_cmd(account_dir: &str) -> Cmd {
+    let profile = sso_profile(account_dir);
+    Cmd::new("aws", ["sso", "login", "--profile", &profile])
+}
+
+fn sso_logout_cmd() -> Cmd {
+    Cmd::new("aws", ["sso", "logout"])
+}
+
 pub fn sso_login(account_dir: &str) {
+    let output = sso_login_cmd(account_dir).run();
+    assert!(output.status().success());
+}
+
+pub fn sso_login_quiet(account_dir: &str) {
+    let mut cmd = sso_login_cmd(account_dir);
+    cmd.hide_command().hide_stdout();
+    let output = cmd.run();
+    assert!(output.status().success());
+}
+
+pub fn sso_logout() {
+    let output = sso_logout_cmd().run();
+    assert!(output.status().success());
+}
+
+pub fn sso_logout_quiet() {
+    let mut cmd = sso_logout_cmd();
+    cmd.hide_command().hide_stdout();
+    let output = cmd.run();
+    assert!(output.status().success());
+}
+
+pub fn sso_profile(account_dir: &str) -> String {
     assert_ne!(
         account_dir, "legacy",
         "can't login to legacy account with sso"
@@ -61,11 +94,5 @@ pub fn sso_login(account_dir: &str) {
         "root" => "rust-root",
         account_dir => account_dir,
     };
-    let output = Cmd::new("aws", ["sso", "login", "--profile", account]).run();
-    assert!(output.status().success());
-}
-
-pub fn sso_logout() {
-    let output = Cmd::new("aws", ["sso", "logout"]).run();
-    assert!(output.status().success());
+    account.to_string()
 }
