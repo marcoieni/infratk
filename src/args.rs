@@ -21,8 +21,8 @@ pub enum Command {
     /// If you are using 1Password, you can get an `ITEM_ID` by running
     /// `op item list`.
     Config,
-    /// Login to the AWS legacy account.
-    /// TODO: Doesn't work yet because it doesn't export the env vars.
+    /// Print shell exports for the AWS legacy account credentials.
+    /// To login, use as: `eval "$(infratk legacy-login)"`.
     #[command(visible_alias = "ll")]
     LegacyLogin,
     /// Get the graph of the terraform modules to see how they depend on each other.
