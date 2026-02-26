@@ -161,7 +161,9 @@ where
     outcome
 }
 
-fn upgrade_terragrunt_with_sso<T>(terragrunt_sso_dirs: &BTreeMap<&str, Vec<T>>) -> Vec<(Utf8PathBuf, PlanOutcome)>
+fn upgrade_terragrunt_with_sso<T>(
+    terragrunt_sso_dirs: &BTreeMap<&str, Vec<T>>,
+) -> Vec<(Utf8PathBuf, PlanOutcome)>
 where
     T: AsRef<Utf8Path>,
 {
@@ -173,11 +175,11 @@ where
     for (account, dirs) in terragrunt_sso_dirs {
         aws::sso_logout();
         aws::sso_login(account);
-        let cmd_runner =CmdRunner::new(BTreeMap::new());
+        let cmd_runner = CmdRunner::new(BTreeMap::new());
         for d in dirs {
             cmd_runner.terragrunt_init_upgrade(d);
             let plan_outcome = cmd_runner.terragrunt_plan(d);
-            outcome.push( (d.to_path_buf(), plan_outcome));
+            outcome.push((d.to_path_buf(), plan_outcome));
         }
     }
     outcome
