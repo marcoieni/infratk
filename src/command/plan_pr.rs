@@ -33,10 +33,7 @@ pub fn plan_pr(args: &PlanPr, config: &Config) {
     }
 }
 
-fn plan_directories(
-    directories: &[&Utf8Path],
-    config: &Config,
-) -> Vec<(Utf8PathBuf, PlanOutcome)> {
+fn plan_directories(directories: &[&Utf8Path], config: &Config) -> Vec<(Utf8PathBuf, PlanOutcome)> {
     let grouped_dirs = GroupedDirs::new(directories);
 
     let mut output: Vec<(Utf8PathBuf, PlanOutcome)> = vec![];
