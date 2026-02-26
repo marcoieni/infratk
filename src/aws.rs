@@ -78,13 +78,6 @@ pub fn sso_logout() {
     assert!(output.status().success());
 }
 
-pub fn sso_logout_quiet() {
-    let mut cmd = sso_logout_cmd();
-    cmd.hide_command().hide_stdout();
-    let output = cmd.run();
-    assert!(output.status().success());
-}
-
 pub fn sso_profile(account_dir: &str) -> String {
     assert_ne!(
         account_dir, "legacy",

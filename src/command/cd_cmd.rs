@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use inquire::Select;
-use secrecy::ExposeSecret;
 
 use crate::{
     aws,
@@ -54,7 +53,7 @@ fn list_modules() -> Vec<Utf8PathBuf> {
     for entry in walker {
         let entry = entry.expect("invalid entry");
         let file_type = entry.file_type().expect("unknown file type");
-        if !file_type.is_file() {
+        if file_type.is_dir() {
             continue;
         }
 
@@ -64,9 +63,9 @@ fn list_modules() -> Vec<Utf8PathBuf> {
         }
 
         let parent = dir::get_stripped_parent(&path);
-        if is_terragrunt_module_file(&path) && is_terragrunt_module_dir(&parent) {
-            modules.insert(parent);
-        } else if is_terraform_module_file(&path) && is_terraform_module_dir(&parent) {
+        if (is_terragrunt_module_file(&path) && is_terragrunt_module_dir(&parent))
+            || (is_terraform_module_file(&path) && is_terraform_module_dir(&parent))
+        {
             modules.insert(parent);
         }
     }
