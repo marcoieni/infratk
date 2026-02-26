@@ -1,3 +1,4 @@
+pub mod cd_cmd;
 pub mod config_cmd;
 pub mod graph_cmd;
 pub mod legacy_login;
