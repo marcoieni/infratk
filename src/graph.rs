@@ -157,6 +157,32 @@ fn get_dependencies(file: &Utf8Path) -> Vec<Utf8PathBuf> {
     dependencies
 }
 
+pub fn get_all_modules() -> Vec<Utf8PathBuf> {
+    let mut dirs = vec![];
+    let current_dir = dir::current_dir();
+    let walker = ignore::WalkBuilder::new(current_dir).build();
+
+    for entry in walker {
+        let entry = entry.expect("invalid entry");
+        let file_type = entry.file_type().expect("unknown file type");
+        if !file_type.is_dir()
+            && (entry.path().extension() == Some("tf".as_ref())
+                || entry.path().extension() == Some("hcl".as_ref()))
+        {
+            let path = entry.path().to_path_buf();
+            let utf8path = Utf8PathBuf::from_path_buf(path).unwrap();
+            let stripped_path = dir::get_stripped_parent(&utf8path);
+            dirs.push(stripped_path);
+        }
+    }
+
+    assert!(
+        !dirs.is_empty(),
+        "no terragrunt/terraform modules found in this repository"
+    );
+    dirs
+}
+
 /// Get all the files that might contain a dependency
 pub fn get_all_tf_and_hcl_files() -> Vec<Utf8PathBuf> {
     let mut files = vec![];

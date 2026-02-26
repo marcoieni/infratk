@@ -4,11 +4,8 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use inquire::Select;
 
 use crate::{
-    aws,
-    command::legacy_login::login_to_legacy_aws_account,
-    config::Config,
-    dir::{self, current_dir_is_simpleinfra},
-    graph,
+    aws, command::legacy_login::login_to_legacy_aws_account, config::Config,
+    dir::current_dir_is_simpleinfra, graph,
 };
 
 const LEGACY_AWS_ENV_VARS: [&str; 4] = [
@@ -20,7 +17,7 @@ const LEGACY_AWS_ENV_VARS: [&str; 4] = [
 
 pub fn cd(config: &Config) {
     assert!(current_dir_is_simpleinfra());
-    let modules = list_modules();
+    let modules = graph::get_all_modules();
     let module = select_module(modules);
     let account = module_account(&module);
 
@@ -43,58 +40,6 @@ fn unset_legacy_env_vars() {
     for key in LEGACY_AWS_ENV_VARS {
         println!("unset {key}");
     }
-}
-
-fn list_modules() -> Vec<Utf8PathBuf> {
-    let mut modules = BTreeSet::new();
-    for path in graph::get_all_tf_and_hcl_files() {
-        if is_path_ignored(&path) {
-            continue;
-        }
-
-        let parent = dir::get_stripped_parent(&path);
-        if (is_terragrunt_module_file(&path) && is_terragrunt_module_dir(&parent))
-            || (is_terraform_module_file(&path) && is_terraform_module_dir(&parent))
-        {
-            modules.insert(parent);
-        }
-    }
-
-    assert!(
-        !modules.is_empty(),
-        "no terragrunt/terraform modules found in this repository"
-    );
-    modules.into_iter().collect()
-}
-
-fn is_path_ignored(path: &Utf8Path) -> bool {
-    path.components().any(|c| {
-        c == Utf8Component::Normal(".git")
-            || c == Utf8Component::Normal(".terraform")
-            || c == Utf8Component::Normal(".terragrunt-cache")
-    })
-}
-
-fn is_terragrunt_module_file(path: &Utf8Path) -> bool {
-    path.file_name() == Some("terragrunt.hcl")
-}
-
-fn is_terraform_module_file(path: &Utf8Path) -> bool {
-    path.extension() == Some("tf")
-}
-
-fn is_terraform_module_dir(path: &Utf8Path) -> bool {
-    path.components().next() == Some(Utf8Component::Normal("terraform"))
-}
-
-fn is_terragrunt_module_dir(path: &Utf8Path) -> bool {
-    let mut components = path.components();
-    let first = components.next();
-    let second = components.next();
-    let third = components.next();
-    first == Some(Utf8Component::Normal("terragrunt"))
-        && second == Some(Utf8Component::Normal("accounts"))
-        && third.is_some()
 }
 
 fn select_module(modules: Vec<Utf8PathBuf>) -> Utf8PathBuf {
