@@ -11,6 +11,8 @@ pub struct CliArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
+    /// Apply changes from the current branch to every affected module.
+    Apply,
     /// Upgrade terragrunt states or Terraform modules.
     Upgrade(UpgradeArgs),
     /// Given a PR, run terragrunt/terraform plan on every module that changed.
@@ -30,6 +32,19 @@ pub enum Command {
     Cd,
     /// Get the graph of the terraform modules to see how they depend on each other.
     Graph(GraphArgs),
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::*;
+
+    #[test]
+    fn apply_subcommand_is_parsed() {
+        let args = CliArgs::try_parse_from(["infratk", "apply"]).unwrap();
+        assert!(matches!(args.command, Command::Apply));
+    }
 }
 
 #[derive(clap::Parser, Debug)]

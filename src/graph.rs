@@ -48,6 +48,73 @@ impl ModulesGraph {
             .collect()
     }
 
+    /// Find deployable root modules affected by a set of changed files.
+    ///
+    /// A change to a reusable module also selects every root module depending
+    /// on it. Account-level Terragrunt configuration selects all roots in that
+    /// account, while repository-level Terragrunt configuration selects roots
+    /// in every account.
+    pub fn get_affected_modules_containing_lockfile<T>(
+        &self,
+        changed_files: &[T],
+    ) -> Vec<Utf8PathBuf>
+    where
+        T: AsRef<Utf8Path>,
+    {
+        self.get_affected_modules(changed_files)
+            .into_iter()
+            .filter(|module| module.join(LOCKFILE).exists())
+            .collect()
+    }
+
+    fn get_affected_modules<T>(&self, changed_files: &[T]) -> Vec<Utf8PathBuf>
+    where
+        T: AsRef<Utf8Path>,
+    {
+        let modules = self.graph.node_weights().cloned().collect::<BTreeSet<_>>();
+        let mut directly_changed = BTreeSet::new();
+
+        for file in changed_files {
+            let file = file.as_ref();
+            if is_global_terragrunt_file(file) {
+                directly_changed.extend(
+                    modules
+                        .iter()
+                        .filter(|module| module.starts_with("terragrunt/accounts"))
+                        .cloned(),
+                );
+                continue;
+            }
+
+            if let Some(account) = account_for_account_level_file(file) {
+                let account_dir = Utf8Path::new("terragrunt/accounts").join(account);
+                directly_changed.extend(
+                    modules
+                        .iter()
+                        .filter(|module| module.starts_with(&account_dir))
+                        .cloned(),
+                );
+                continue;
+            }
+
+            let closest_module = modules
+                .iter()
+                .filter(|module| file.starts_with(module))
+                .max_by_key(|module| module.components().count());
+            if let Some(module) = closest_module {
+                directly_changed.insert(module.clone());
+            } else {
+                warn!("No Terraform or Terragrunt module found for changed file {file}");
+            }
+        }
+
+        let directly_changed = directly_changed.into_iter().collect::<Vec<_>>();
+        let mut affected = self.get_dependent_modules(&directly_changed);
+        affected.sort();
+        affected.dedup();
+        affected
+    }
+
     pub fn get_dependent_modules<T>(&self, modules: &[T]) -> Vec<Utf8PathBuf>
     where
         T: AsRef<Utf8Path>,
@@ -98,6 +165,22 @@ impl ModulesGraph {
 
         inverted_graph
     }
+}
+
+fn is_global_terragrunt_file(file: &Utf8Path) -> bool {
+    file.starts_with("terragrunt")
+        && !file.starts_with("terragrunt/accounts")
+        && !file.starts_with("terragrunt/modules")
+}
+
+fn account_for_account_level_file(file: &Utf8Path) -> Option<&str> {
+    let relative = file.strip_prefix("terragrunt/accounts").ok()?;
+    let mut components = relative.components();
+    let account = components.next()?.as_str();
+
+    // A file directly in the account directory affects every state in it. A
+    // file below the next component belongs to one specific state instead.
+    (components.count() == 1).then_some(account)
 }
 
 fn remove_duplicates(modules: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
@@ -265,5 +348,43 @@ mod tests {
         fs_err::write(file.path(), content).unwrap();
         let dependencies = get_dependencies(file.path());
         assert_eq!(dependencies.len(), 1);
+    }
+
+    #[test]
+    fn reusable_module_change_selects_dependent_state() {
+        let mut graph = Graph::new();
+        let module = graph.add_node(Utf8PathBuf::from("terragrunt/modules/service"));
+        let state = graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/service"));
+        graph.add_edge(state, module, 0);
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_affected_modules(&["terragrunt/modules/service/main.tf"]),
+            vec![
+                Utf8PathBuf::from("terragrunt/accounts/production/service"),
+                Utf8PathBuf::from("terragrunt/modules/service"),
+            ]
+        );
+    }
+
+    #[test]
+    fn account_config_change_selects_all_account_states() {
+        let mut graph = Graph::new();
+        graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/service-a",
+        ));
+        graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/service-b",
+        ));
+        graph.add_node(Utf8PathBuf::from("terragrunt/accounts/staging/service-a"));
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_affected_modules(&["terragrunt/accounts/production/account.json"]),
+            vec![
+                Utf8PathBuf::from("terragrunt/accounts/production/service-a"),
+                Utf8PathBuf::from("terragrunt/accounts/production/service-b"),
+            ]
+        );
     }
 }

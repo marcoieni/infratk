@@ -91,6 +91,36 @@ impl GroupedDirs {
         output.extend(plan_outcome);
         output
     }
+
+    pub fn apply_all(&self, config: &Config) {
+        if self.contains_legacy_account() {
+            apply_legacy_dirs(self.terraform_dirs(), self.legacy_terragrunt_dirs(), config);
+        }
+
+        for (account, dirs) in self.sso_terragrunt_dirs() {
+            aws::ensure_sso_login(account);
+            let cmd_runner = CmdRunner::new(BTreeMap::new());
+            for directory in dirs {
+                cmd_runner.terragrunt_apply(&directory);
+            }
+        }
+    }
+}
+
+fn apply_legacy_dirs<T, U>(terraform_dirs: Vec<T>, terragrunt_dirs: Vec<U>, config: &Config)
+where
+    T: AsRef<Utf8Path>,
+    U: AsRef<Utf8Path>,
+{
+    let login_env_vars = aws::legacy_login(config.op_legacy_item_id.as_deref());
+    let cmd_runner = CmdRunner::new(login_env_vars);
+
+    for directory in terraform_dirs {
+        cmd_runner.terraform_apply(directory.as_ref());
+    }
+    for directory in terragrunt_dirs {
+        cmd_runner.terragrunt_apply(directory.as_ref());
+    }
 }
 
 fn get_dirs_starting_with<'a>(directories: Vec<&'a Utf8Path>, name: &str) -> Vec<&'a Utf8Path> {

@@ -36,6 +36,7 @@ pub struct Cmd {
     args: Vec<String>,
     current_dir: Option<Utf8PathBuf>,
     hide_stdout: bool,
+    hide_stderr: bool,
     hide_command: bool,
 }
 
@@ -54,6 +55,7 @@ impl Cmd {
             args,
             current_dir: None,
             hide_stdout: false,
+            hide_stderr: false,
             hide_command: false,
             env_vars: BTreeMap::new(),
         }
@@ -71,6 +73,11 @@ impl Cmd {
 
     pub fn hide_stdout(&mut self) -> &mut Self {
         self.hide_stdout = true;
+        self
+    }
+
+    pub fn hide_stderr(&mut self) -> &mut Self {
+        self.hide_stderr = true;
         self
     }
 
@@ -133,7 +140,9 @@ impl Cmd {
                 output_stdout.push_str(&line);
                 output_stdout.push('\n');
             } else {
-                eprintln!("{line}");
+                if !self.hide_stderr {
+                    eprintln!("{line}");
+                }
                 output_stderr.push_str(&line);
                 output_stderr.push('\n');
             }
@@ -145,5 +154,32 @@ impl Cmd {
             stdout: output_stdout,
             stderr: output_stderr,
         }
+    }
+
+    /// Run a command attached to the terminal.
+    ///
+    /// Unlike [`Self::run`], this preserves interactive prompts such as the
+    /// confirmation requested by `terraform apply`.
+    pub fn run_interactive(&self) -> ExitStatus {
+        let mut to_print = format!("🚀 {} {}", self.name, self.args.join(" "));
+        let mut command = Command::new(&self.name);
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
+            to_print.push_str(&format!(" 👉 {dir}"));
+        }
+        for (key, value) in &self.env_vars {
+            command.env(key, value.expose_secret());
+        }
+        if !self.hide_command {
+            println!("{to_print}");
+        }
+
+        command
+            .args(&self.args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .unwrap()
     }
 }

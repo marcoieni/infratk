@@ -28,6 +28,22 @@ impl CmdRunner {
         self.plan(module, "terraform")
     }
 
+    pub fn terragrunt_apply(&self, state: &Utf8Path) {
+        self.apply(state, "terragrunt");
+    }
+
+    pub fn terraform_apply(&self, module: &Utf8Path) {
+        self.apply(module, "terraform");
+    }
+
+    fn apply(&self, directory: &Utf8Path, command: &str) {
+        let status = Cmd::new(command, ["apply"])
+            .with_env_vars(self.env_vars.clone())
+            .with_current_dir(directory)
+            .run_interactive();
+        assert!(status.success(), "{command} apply failed in {directory}");
+    }
+
     /// Check if Terragrunt or Terraform plan is clean.
     /// Useful to check wheter there are some unapplied changes in the repo.
     fn plan(&self, directory: &Utf8Path, command: &str) -> PlanOutcome {
