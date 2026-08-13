@@ -14,10 +14,16 @@ pub struct ModulesGraph {
 
 impl ModulesGraph {
     pub fn new(outdated_packages: Option<&BTreeSet<Utf8PathBuf>>) -> Self {
+        Self::from_files(get_all_tf_and_hcl_files(), outdated_packages)
+    }
+
+    fn from_files(
+        files: Vec<Utf8PathBuf>,
+        outdated_packages: Option<&BTreeSet<Utf8PathBuf>>,
+    ) -> Self {
         let mut graph: Graph<Utf8PathBuf, i32> = Graph::new();
         // Collection of `file` - `graph index`.
         let mut indices = HashMap::<Utf8PathBuf, NodeIndex>::new();
-        let files = get_all_tf_and_hcl_files();
         for f in files {
             let f_parent = dir::get_stripped_parent(&f);
             let node_index = indices
@@ -373,7 +379,7 @@ fn get_relative_path(path: &Utf8Path) -> Utf8PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camino_tempfile::NamedUtf8TempFile;
+    use camino_tempfile::{NamedUtf8TempFile, Utf8TempDir};
 
     #[test]
     fn dependencies_are_read() {
@@ -388,18 +394,61 @@ mod tests {
 
     #[test]
     fn reusable_module_change_selects_dependent_state() {
-        let mut graph = Graph::new();
-        let module = graph.add_node(Utf8PathBuf::from("terragrunt/modules/service"));
-        let state = graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/service"));
-        graph.add_edge(state, module, 0);
-        let graph = ModulesGraph { graph };
+        let temp = Utf8TempDir::new().unwrap();
+        let reusable_module = temp.path().join("terragrunt/modules/runtime");
+        let other_module = temp.path().join("terragrunt/modules/database");
+        let dependent_state = temp
+            .path()
+            .join("terragrunt/accounts/production/billing-api");
+        let same_named_state = temp.path().join("terragrunt/accounts/production/runtime");
+
+        for directory in [
+            &reusable_module,
+            &other_module,
+            &dependent_state,
+            &same_named_state,
+        ] {
+            fs_err::create_dir_all(directory).unwrap();
+        }
+
+        let reusable_module_file = reusable_module.join("main.tf");
+        let other_module_file = other_module.join("main.tf");
+        let dependent_state_file = dependent_state.join("terragrunt.hcl");
+        let same_named_state_file = same_named_state.join("terragrunt.hcl");
+        fs_err::write(&reusable_module_file, "").unwrap();
+        fs_err::write(&other_module_file, "").unwrap();
+        fs_err::write(
+            &dependent_state_file,
+            r#"
+terraform {
+    source = "../../../modules//runtime"
+}
+"#,
+        )
+        .unwrap();
+        fs_err::write(
+            &same_named_state_file,
+            r#"
+terraform {
+    source = "../../../modules//database"
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = ModulesGraph::from_files(
+            vec![
+                reusable_module_file.clone(),
+                other_module_file,
+                dependent_state_file,
+                same_named_state_file,
+            ],
+            None,
+        );
 
         assert_eq!(
-            graph.get_affected_modules(&["terragrunt/modules/service/main.tf"]),
-            vec![
-                Utf8PathBuf::from("terragrunt/modules/service"),
-                Utf8PathBuf::from("terragrunt/accounts/production/service"),
-            ]
+            graph.get_affected_modules(&[reusable_module_file]),
+            vec![reusable_module, dependent_state]
         );
     }
 
