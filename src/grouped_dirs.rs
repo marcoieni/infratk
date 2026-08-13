@@ -33,12 +33,6 @@ enum LoginPolicy {
     Reuse,
 }
 
-#[derive(Clone, Copy)]
-enum ExecutionOrder {
-    GroupedByAccount,
-    PreserveDependencies,
-}
-
 impl GroupedDirs {
     pub fn new<T>(directories: &[T]) -> Self
     where
@@ -65,7 +59,6 @@ impl GroupedDirs {
         self.for_each_authenticated_directory(
             config,
             LoginPolicy::Fresh,
-            ExecutionOrder::GroupedByAccount,
             |cmd_runner, tool, directory| {
                 let outcome = match tool {
                     Tool::Terraform => cmd_runner.terraform_plan(directory),
@@ -82,7 +75,6 @@ impl GroupedDirs {
         self.for_each_authenticated_directory(
             config,
             LoginPolicy::Fresh,
-            ExecutionOrder::GroupedByAccount,
             |cmd_runner, tool, directory| {
                 let outcome = match tool {
                     Tool::Terraform => {
@@ -104,7 +96,6 @@ impl GroupedDirs {
         self.for_each_authenticated_directory(
             config,
             LoginPolicy::Reuse,
-            ExecutionOrder::PreserveDependencies,
             |cmd_runner, tool, directory| match tool {
                 Tool::Terraform => cmd_runner.terraform_apply(directory),
                 Tool::Terragrunt => cmd_runner.terragrunt_apply(directory),
@@ -116,10 +107,9 @@ impl GroupedDirs {
         &self,
         config: &Config,
         login_policy: LoginPolicy,
-        execution_order: ExecutionOrder,
         mut operation: impl FnMut(&CmdRunner, Tool, &Utf8Path),
     ) {
-        for batch in self.execution_batches(execution_order) {
+        for batch in self.execution_batches() {
             let account = batch.first().expect("empty execution batch").account();
             let cmd_runner = authenticated_cmd_runner(account, config, login_policy);
             for directory in batch {
@@ -128,40 +118,22 @@ impl GroupedDirs {
         }
     }
 
-    fn execution_batches(&self, execution_order: ExecutionOrder) -> Vec<Vec<&GroupedDir>> {
-        match execution_order {
-            ExecutionOrder::GroupedByAccount => {
-                let mut by_account = BTreeMap::<&str, Vec<&GroupedDir>>::new();
-                for directory in &self.directories {
-                    by_account
-                        .entry(directory.account())
-                        .or_default()
-                        .push(directory);
-                }
-
-                // Preserve the historical behavior of handling legacy credentials first.
-                let mut batches = Vec::with_capacity(by_account.len());
-                if let Some(legacy) = by_account.remove("legacy") {
-                    batches.push(legacy);
-                }
-                batches.extend(by_account.into_values());
-                batches
-            }
-            ExecutionOrder::PreserveDependencies => {
-                let mut batches = Vec::<Vec<&GroupedDir>>::new();
-                for directory in &self.directories {
-                    if let Some(batch) = batches
-                        .last_mut()
-                        .filter(|batch| batch[0].account() == directory.account())
-                    {
-                        batch.push(directory);
-                    } else {
-                        batches.push(vec![directory]);
-                    }
-                }
-                batches
-            }
+    fn execution_batches(&self) -> Vec<Vec<&GroupedDir>> {
+        let mut by_account = BTreeMap::<&str, Vec<&GroupedDir>>::new();
+        for directory in &self.directories {
+            by_account
+                .entry(directory.account())
+                .or_default()
+                .push(directory);
         }
+
+        // Preserve the historical behavior of handling legacy credentials first.
+        let mut batches = Vec::with_capacity(by_account.len());
+        if let Some(legacy) = by_account.remove("legacy") {
+            batches.push(legacy);
+        }
+        batches.extend(by_account.into_values());
+        batches
     }
 }
 
@@ -242,7 +214,7 @@ mod tests {
         };
 
         let grouped_paths = directories
-            .execution_batches(ExecutionOrder::GroupedByAccount)
+            .execution_batches()
             .into_iter()
             .map(|batch| {
                 batch
@@ -259,32 +231,6 @@ mod tests {
                     Utf8PathBuf::from("terragrunt/accounts/a/second"),
                 ],
                 vec![Utf8PathBuf::from("terragrunt/accounts/b/only")],
-            ]
-        );
-    }
-
-    #[test]
-    fn apply_order_preserves_dependency_order() {
-        let directories = GroupedDirs {
-            directories: vec![
-                GroupedDir::new(Utf8Path::new("terragrunt/accounts/a/first")).unwrap(),
-                GroupedDir::new(Utf8Path::new("terragrunt/accounts/b/only")).unwrap(),
-                GroupedDir::new(Utf8Path::new("terragrunt/accounts/a/second")).unwrap(),
-            ],
-        };
-
-        let ordered_paths = directories
-            .execution_batches(ExecutionOrder::PreserveDependencies)
-            .into_iter()
-            .flatten()
-            .map(|directory| directory.path().to_path_buf())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ordered_paths,
-            vec![
-                Utf8PathBuf::from("terragrunt/accounts/a/first"),
-                Utf8PathBuf::from("terragrunt/accounts/b/only"),
-                Utf8PathBuf::from("terragrunt/accounts/a/second"),
             ]
         );
     }
