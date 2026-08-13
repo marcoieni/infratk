@@ -1,17 +1,9 @@
-use std::collections::BTreeMap;
-
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::{
-    args::PlanPr,
-    aws, clipboard,
-    cmd::Cmd,
-    cmd_runner::{CmdRunner, PlanOutcome},
-    config::Config,
-    dir::current_dir_is_simpleinfra,
-    git::assert_current_branch_is_same_as_pr,
-    grouped_dirs::GroupedDirs,
-    pretty_format, LOCKFILE,
+    args::PlanPr, clipboard, cmd::Cmd, cmd_runner::PlanOutcome, config::Config,
+    dir::current_dir_is_simpleinfra, git::assert_current_branch_is_same_as_pr,
+    grouped_dirs::GroupedDirs, pretty_format, LOCKFILE,
 };
 
 pub fn plan_pr(args: &PlanPr, config: &Config) {
@@ -34,70 +26,7 @@ pub fn plan_pr(args: &PlanPr, config: &Config) {
 }
 
 fn plan_directories(directories: &[&Utf8Path], config: &Config) -> Vec<(Utf8PathBuf, PlanOutcome)> {
-    let grouped_dirs = GroupedDirs::new(directories);
-
-    let mut output: Vec<(Utf8PathBuf, PlanOutcome)> = vec![];
-    if grouped_dirs.contains_legacy_account() {
-        let legacy_tg_dirs = grouped_dirs.legacy_terragrunt_dirs();
-        let o = plan_legacy_dirs(grouped_dirs.terraform_dirs(), legacy_tg_dirs, config);
-        output.extend(o);
-    }
-
-    let sso_terragrunt_dirs = grouped_dirs.sso_terragrunt_dirs();
-    let o = plan_terragrunt_with_sso(&sso_terragrunt_dirs);
-    output.extend(o);
-
-    output
-}
-
-fn plan_legacy_dirs<T, U>(
-    terraform_dirs: Vec<T>,
-    terragrunt_dirs: Vec<U>,
-    config: &Config,
-) -> Vec<(Utf8PathBuf, PlanOutcome)>
-where
-    T: AsRef<Utf8Path>,
-    U: AsRef<Utf8Path>,
-{
-    // logout before login, to avoid issues with multiple profiles
-    aws::sso_logout();
-    let login_env_vars = aws::legacy_login(config.op_legacy_item_id.as_deref());
-    let cmd_runner = CmdRunner::new(login_env_vars);
-
-    let mut output = vec![];
-    for d in terraform_dirs {
-        let d = d.as_ref();
-        let o = cmd_runner.terraform_plan(d);
-        output.push((d.to_path_buf(), o));
-    }
-    for d in terragrunt_dirs {
-        let d = d.as_ref();
-        let o = cmd_runner.terragrunt_plan(d);
-        output.push((d.to_path_buf(), o));
-    }
-    output
-}
-
-fn plan_terragrunt_with_sso<T>(
-    terragrunt_sso_dirs: &BTreeMap<&str, Vec<T>>,
-) -> Vec<(Utf8PathBuf, PlanOutcome)>
-where
-    T: AsRef<Utf8Path>,
-{
-    let terragrunt_sso_dirs = terragrunt_sso_dirs
-        .iter()
-        .map(|(k, v)| (*k, v.iter().map(|d| d.as_ref()).collect::<Vec<_>>()))
-        .collect::<BTreeMap<_, _>>();
-    let mut outcome = vec![];
-    for (account, dirs) in terragrunt_sso_dirs {
-        aws::sso_logout();
-        aws::sso_login(account);
-        for d in dirs {
-            let plan_outcome = CmdRunner::new(BTreeMap::new()).terragrunt_plan(d);
-            outcome.push((d.to_path_buf(), plan_outcome));
-        }
-    }
-    outcome
+    GroupedDirs::new(directories).plan_all(config)
 }
 
 fn get_files_changes(pr: &str) -> Vec<Utf8PathBuf> {

@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use camino::{Utf8Path, Utf8PathBuf};
 use tracing::{debug, warn};
 
-use petgraph::{graph::NodeIndex, visit::Bfs, Graph};
+use petgraph::{graph::NodeIndex, visit::Bfs, Direction, Graph};
 
 use crate::{dir, LOCKFILE};
 
@@ -109,10 +109,66 @@ impl ModulesGraph {
         }
 
         let directly_changed = directly_changed.into_iter().collect::<Vec<_>>();
-        let mut affected = self.get_dependent_modules(&directly_changed);
-        affected.sort();
-        affected.dedup();
-        affected
+        let affected = self.get_dependent_modules(&directly_changed);
+        self.order_modules_prerequisites_first(affected)
+    }
+
+    /// Order modules so every selected dependency precedes its dependents.
+    fn order_modules_prerequisites_first(&self, modules: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
+        let modules = modules.into_iter().collect::<BTreeSet<_>>();
+        let indices = self
+            .graph
+            .node_indices()
+            .map(|index| (self.graph[index].clone(), index))
+            .collect::<HashMap<_, _>>();
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::with_capacity(modules.len());
+
+        for module in &modules {
+            let index = indices[module];
+            self.visit_dependencies_first(
+                index,
+                &modules,
+                &mut visiting,
+                &mut visited,
+                &mut ordered,
+            );
+        }
+
+        ordered
+    }
+
+    fn visit_dependencies_first(
+        &self,
+        index: NodeIndex,
+        selected: &BTreeSet<Utf8PathBuf>,
+        visiting: &mut HashSet<NodeIndex>,
+        visited: &mut HashSet<NodeIndex>,
+        ordered: &mut Vec<Utf8PathBuf>,
+    ) {
+        if visited.contains(&index) {
+            return;
+        }
+        assert!(
+            visiting.insert(index),
+            "dependency cycle detected at {}",
+            self.graph[index]
+        );
+
+        let mut dependencies = self
+            .graph
+            .neighbors_directed(index, Direction::Outgoing)
+            .filter(|dependency| selected.contains(&self.graph[*dependency]))
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
+        for dependency in dependencies {
+            self.visit_dependencies_first(dependency, selected, visiting, visited, ordered);
+        }
+
+        visiting.remove(&index);
+        visited.insert(index);
+        ordered.push(self.graph[index].clone());
     }
 
     pub fn get_dependent_modules<T>(&self, modules: &[T]) -> Vec<Utf8PathBuf>
@@ -361,8 +417,36 @@ mod tests {
         assert_eq!(
             graph.get_affected_modules(&["terragrunt/modules/service/main.tf"]),
             vec![
-                Utf8PathBuf::from("terragrunt/accounts/production/service"),
                 Utf8PathBuf::from("terragrunt/modules/service"),
+                Utf8PathBuf::from("terragrunt/accounts/production/service"),
+            ]
+        );
+    }
+
+    #[test]
+    fn affected_modules_are_ordered_prerequisites_first() {
+        let mut graph = Graph::new();
+        let reusable = graph.add_node(Utf8PathBuf::from("terragrunt/modules/network"));
+        let prerequisite =
+            graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/z-vpc"));
+        let middle = graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/b-cluster",
+        ));
+        let dependent = graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/a-service",
+        ));
+        graph.add_edge(prerequisite, reusable, 0);
+        graph.add_edge(middle, prerequisite, 0);
+        graph.add_edge(dependent, middle, 0);
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_affected_modules(&["terragrunt/modules/network/main.tf"]),
+            vec![
+                Utf8PathBuf::from("terragrunt/modules/network"),
+                Utf8PathBuf::from("terragrunt/accounts/production/z-vpc"),
+                Utf8PathBuf::from("terragrunt/accounts/production/b-cluster"),
+                Utf8PathBuf::from("terragrunt/accounts/production/a-service"),
             ]
         );
     }

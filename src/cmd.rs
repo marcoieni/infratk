@@ -87,20 +87,9 @@ impl Cmd {
     }
 
     pub fn run(&self) -> CmdOutput {
-        let mut to_print = format!("🚀 {} {}", self.name, self.args.join(" "));
-        let mut command = Command::new(&self.name);
-        if let Some(dir) = &self.current_dir {
-            command.current_dir(dir);
-            to_print.push_str(&format!(" 👉 {dir}"));
-        }
-        for (key, value) in &self.env_vars {
-            command.env(key, value.expose_secret());
-        }
-        if !self.hide_command {
-            println!("{to_print}");
-        }
+        let mut command = self.command();
+        self.print_command();
         let mut child = command
-            .args(&self.args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -161,25 +150,42 @@ impl Cmd {
     /// Unlike [`Self::run`], this preserves interactive prompts such as the
     /// confirmation requested by `terraform apply`.
     pub fn run_interactive(&self) -> ExitStatus {
-        let mut to_print = format!("🚀 {} {}", self.name, self.args.join(" "));
-        let mut command = Command::new(&self.name);
-        if let Some(dir) = &self.current_dir {
-            command.current_dir(dir);
-            to_print.push_str(&format!(" 👉 {dir}"));
-        }
-        for (key, value) in &self.env_vars {
-            command.env(key, value.expose_secret());
-        }
-        if !self.hide_command {
-            println!("{to_print}");
-        }
+        assert!(
+            !self.hide_stdout && !self.hide_stderr,
+            "interactive commands inherit stdout and stderr and cannot hide them"
+        );
+        let mut command = self.command();
+        self.print_command();
 
         command
-            .args(&self.args)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
             .unwrap()
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.name);
+        command.args(&self.args);
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
+        }
+        for (key, value) in &self.env_vars {
+            command.env(key, value.expose_secret());
+        }
+        command
+    }
+
+    fn print_command(&self) {
+        if self.hide_command {
+            return;
+        }
+
+        let mut command = format!("🚀 {} {}", self.name, self.args.join(" "));
+        if let Some(dir) = &self.current_dir {
+            command.push_str(&format!(" 👉 {dir}"));
+        }
+        println!("{command}");
     }
 }

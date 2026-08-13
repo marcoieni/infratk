@@ -14,7 +14,7 @@ pub fn apply(config: &Config) {
     );
     assert_aws_env_is_not_set();
 
-    let changed_files = git::current_branch_changed_files();
+    let changed_files = git::current_branch_changed_files(&repo);
     if changed_files.is_empty() {
         println!("No changes found on the current branch.");
         return;
