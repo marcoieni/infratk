@@ -119,6 +119,7 @@ impl GroupedDirs {
     }
 
     fn execution_batches(&self) -> Vec<Vec<&GroupedDir>> {
+        // Grouping by account is safe because simpleinfra has no cross-account dependencies.
         let mut by_account = BTreeMap::<&str, Vec<&GroupedDir>>::new();
         for directory in &self.directories {
             by_account
