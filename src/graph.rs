@@ -1,9 +1,9 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tracing::{debug, warn};
 
-use petgraph::{graph::NodeIndex, visit::Bfs, Direction, Graph};
+use petgraph::{graph::NodeIndex, Direction, Graph};
 
 use crate::{dir, LOCKFILE};
 
@@ -110,26 +110,26 @@ impl ModulesGraph {
 
         let directly_changed = directly_changed.into_iter().collect::<Vec<_>>();
         let affected = self.get_dependent_modules(&directly_changed);
-        self.order_modules_prerequisites_first(affected)
+        self.order_modules_prerequisites_first(&affected)
     }
 
     /// Order modules so every selected dependency precedes its dependents.
-    fn order_modules_prerequisites_first(&self, modules: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
-        let modules = modules.into_iter().collect::<BTreeSet<_>>();
-        let indices = self
-            .graph
-            .node_indices()
-            .map(|index| (self.graph[index].clone(), index))
-            .collect::<HashMap<_, _>>();
+    fn order_modules_prerequisites_first(&self, modules: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
+        let indices = self.module_indices();
+        let mut roots = modules
+            .iter()
+            .map(|module| indices[module.as_path()])
+            .collect::<Vec<_>>();
+        roots.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
+        let selected = roots.iter().copied().collect::<HashSet<_>>();
         let mut visiting = HashSet::new();
         let mut visited = HashSet::new();
-        let mut ordered = Vec::with_capacity(modules.len());
+        let mut ordered = Vec::with_capacity(selected.len());
 
-        for module in &modules {
-            let index = indices[module];
+        for index in roots {
             self.visit_dependencies_first(
                 index,
-                &modules,
+                &selected,
                 &mut visiting,
                 &mut visited,
                 &mut ordered,
@@ -142,7 +142,7 @@ impl ModulesGraph {
     fn visit_dependencies_first(
         &self,
         index: NodeIndex,
-        selected: &BTreeSet<Utf8PathBuf>,
+        selected: &HashSet<NodeIndex>,
         visiting: &mut HashSet<NodeIndex>,
         visited: &mut HashSet<NodeIndex>,
         ordered: &mut Vec<Utf8PathBuf>,
@@ -159,7 +159,7 @@ impl ModulesGraph {
         let mut dependencies = self
             .graph
             .neighbors_directed(index, Direction::Outgoing)
-            .filter(|dependency| selected.contains(&self.graph[*dependency]))
+            .filter(|dependency| selected.contains(dependency))
             .collect::<Vec<_>>();
         dependencies.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
         for dependency in dependencies {
@@ -175,51 +175,45 @@ impl ModulesGraph {
     where
         T: AsRef<Utf8Path>,
     {
-        let modules = modules.iter().map(|m| m.as_ref()).collect::<Vec<_>>();
-        let mut dependent_modules = vec![];
-        for m in modules {
-            let dependent_modules_of_dir = self.get_dependent_modules_of_dir(m);
-            dependent_modules.extend(dependent_modules_of_dir);
+        let indices = self.module_indices();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        for module in modules {
+            let module = module.as_ref();
+            let index = *indices
+                .get(module)
+                .unwrap_or_else(|| panic!("module not found in graph: {module}"));
+            if visited.insert(index) {
+                queue.push_back(index);
+            }
         }
-        remove_duplicates(dependent_modules)
-    }
 
-    pub fn get_dependent_modules_of_dir(&self, module: &Utf8Path) -> Vec<Utf8PathBuf> {
-        let module_index = self
-            .graph
-            .node_indices()
-            .find(|i| self.graph[*i] == module)
-            .expect("module not found in graph");
-        let mut dependent_modules = vec![];
+        let mut dependent_modules = Vec::new();
+        while let Some(index) = queue.pop_front() {
+            debug!("Found dependent module: {:?}", self.graph[index]);
+            dependent_modules.push(self.graph[index].clone());
 
-        let inverted_graph = self.invert_graph();
-        let mut bfs = Bfs::new(&inverted_graph, module_index);
-
-        while let Some(nx) = bfs.next(&inverted_graph) {
-            let dep = inverted_graph[nx].clone();
-            debug!("Found dependent module: {:?}", dep);
-            dependent_modules.push(dep);
+            let mut dependents = self
+                .graph
+                .neighbors_directed(index, Direction::Incoming)
+                .collect::<Vec<_>>();
+            dependents.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
+            for dependent in dependents {
+                if visited.insert(dependent) {
+                    queue.push_back(dependent);
+                }
+            }
         }
 
         dependent_modules
     }
 
-    fn invert_graph(&self) -> Graph<Utf8PathBuf, i32> {
-        let mut inverted_graph = Graph::new();
-        let mut node_map = HashMap::new();
-
-        for node_index in self.graph.node_indices() {
-            let node = &self.graph[node_index];
-            let new_node_index = inverted_graph.add_node(node.clone());
-            node_map.insert(node_index, new_node_index);
-        }
-
-        for edge in self.graph.edge_indices() {
-            let (source, target) = self.graph.edge_endpoints(edge).unwrap();
-            inverted_graph.add_edge(node_map[&target], node_map[&source], 0);
-        }
-
-        inverted_graph
+    fn module_indices(&self) -> HashMap<&Utf8Path, NodeIndex> {
+        self.graph
+            .node_indices()
+            .map(|index| (self.graph[index].as_path(), index))
+            .collect()
     }
 }
 
@@ -237,20 +231,6 @@ fn account_for_account_level_file(file: &Utf8Path) -> Option<&str> {
     // A file directly in the account directory affects every state in it. A
     // file below the next component belongs to one specific state instead.
     (components.count() == 1).then_some(account)
-}
-
-fn remove_duplicates(modules: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
-    let mut seen = HashSet::new();
-    let mut unique_modules = vec![];
-    for module in modules {
-        let value_was_inserted = seen.insert(module.clone());
-        if value_was_inserted {
-            unique_modules.push(module);
-        }
-        // If the value wasn't inserted it means that it was already in the set.
-        // I.e. we already saw it, so it's a duplicate.
-    }
-    unique_modules
 }
 
 fn add_node(
@@ -468,6 +448,29 @@ mod tests {
             vec![
                 Utf8PathBuf::from("terragrunt/accounts/production/service-a"),
                 Utf8PathBuf::from("terragrunt/accounts/production/service-b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_source_traversal_deduplicates_shared_dependents() {
+        let mut graph = Graph::new();
+        let module_a = graph.add_node(Utf8PathBuf::from("terragrunt/modules/a"));
+        let module_b = graph.add_node(Utf8PathBuf::from("terragrunt/modules/b"));
+        let state = graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/service"));
+        graph.add_edge(state, module_a, 0);
+        graph.add_edge(state, module_b, 0);
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_dependent_modules(&[
+                Utf8PathBuf::from("terragrunt/modules/a"),
+                Utf8PathBuf::from("terragrunt/modules/b"),
+            ]),
+            vec![
+                Utf8PathBuf::from("terragrunt/modules/a"),
+                Utf8PathBuf::from("terragrunt/modules/b"),
+                Utf8PathBuf::from("terragrunt/accounts/production/service"),
             ]
         );
     }
