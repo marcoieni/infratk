@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::{BufRead as _, BufReader},
+    io::{BufRead as _, BufReader, Read, Write},
     process::{Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
@@ -165,6 +165,40 @@ impl Cmd {
             .unwrap()
     }
 
+    /// Run a command attached to the terminal while capturing its output.
+    ///
+    /// Output is forwarded as bytes instead of lines so prompts that do not end
+    /// in a newline remain visible to the user.
+    pub fn run_interactive_with_output(&self) -> CmdOutput {
+        assert!(
+            !self.hide_stdout && !self.hide_stderr,
+            "interactive commands inherit stdout and stderr and cannot hide them"
+        );
+        let mut command = self.command();
+        self.print_command();
+        let mut child = command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let stdout_thread = thread::spawn(move || capture_and_forward(stdout, std::io::stdout()));
+        let stderr_thread = thread::spawn(move || capture_and_forward(stderr, std::io::stderr()));
+
+        let status = child.wait().unwrap();
+        let stdout = stdout_thread.join().unwrap();
+        let stderr = stderr_thread.join().unwrap();
+
+        CmdOutput {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(&self.name);
         command.args(&self.args);
@@ -188,4 +222,19 @@ impl Cmd {
         }
         println!("{command}");
     }
+}
+
+fn capture_and_forward(mut reader: impl Read, mut writer: impl Write) -> String {
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let bytes_read = reader.read(&mut buffer).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..bytes_read]).unwrap();
+        writer.flush().unwrap();
+        output.extend_from_slice(&buffer[..bytes_read]);
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
