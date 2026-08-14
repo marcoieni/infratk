@@ -66,6 +66,21 @@ pub fn sso_login(account_dir: &str) {
     assert!(output.status().success());
 }
 
+/// Reuse valid cached SSO credentials, opening the browser login only when the
+/// selected profile can no longer call AWS.
+pub fn ensure_sso_login(account_dir: &str) {
+    let profile = sso_profile(account_dir);
+    let output = Cmd::new("aws", ["sts", "get-caller-identity", "--profile", &profile])
+        .hide_command()
+        .hide_stdout()
+        .hide_stderr()
+        .run();
+
+    if !output.status().success() {
+        sso_login(account_dir);
+    }
+}
+
 pub fn sso_login_quiet(account_dir: &str) {
     let mut cmd = sso_login_cmd(account_dir);
     cmd.hide_command().hide_stdout();

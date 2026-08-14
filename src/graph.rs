@@ -1,9 +1,9 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tracing::{debug, warn};
 
-use petgraph::{graph::NodeIndex, visit::Bfs, Graph};
+use petgraph::{graph::NodeIndex, Direction, Graph};
 
 use crate::{dir, LOCKFILE};
 
@@ -14,10 +14,16 @@ pub struct ModulesGraph {
 
 impl ModulesGraph {
     pub fn new(outdated_packages: Option<&BTreeSet<Utf8PathBuf>>) -> Self {
+        Self::from_files(get_all_tf_and_hcl_files(), outdated_packages)
+    }
+
+    fn from_files(
+        files: Vec<Utf8PathBuf>,
+        outdated_packages: Option<&BTreeSet<Utf8PathBuf>>,
+    ) -> Self {
         let mut graph: Graph<Utf8PathBuf, i32> = Graph::new();
         // Collection of `file` - `graph index`.
         let mut indices = HashMap::<Utf8PathBuf, NodeIndex>::new();
-        let files = get_all_tf_and_hcl_files();
         for f in files {
             let f_parent = dir::get_stripped_parent(&f);
             let node_index = indices
@@ -48,70 +54,189 @@ impl ModulesGraph {
             .collect()
     }
 
+    /// Find deployable root modules affected by a set of changed files.
+    ///
+    /// A change to a reusable module also selects every root module depending
+    /// on it. Account-level Terragrunt configuration selects all roots in that
+    /// account, while repository-level Terragrunt configuration selects roots
+    /// in every account.
+    pub fn get_affected_modules_containing_lockfile<T>(
+        &self,
+        changed_files: &[T],
+    ) -> Vec<Utf8PathBuf>
+    where
+        T: AsRef<Utf8Path>,
+    {
+        self.get_affected_modules(changed_files)
+            .into_iter()
+            .filter(|module| module.join(LOCKFILE).exists())
+            .collect()
+    }
+
+    fn get_affected_modules<T>(&self, changed_files: &[T]) -> Vec<Utf8PathBuf>
+    where
+        T: AsRef<Utf8Path>,
+    {
+        let modules = self.graph.node_weights().cloned().collect::<BTreeSet<_>>();
+        let mut directly_changed = BTreeSet::new();
+
+        for file in changed_files {
+            let file = file.as_ref();
+            if is_global_terragrunt_file(file) {
+                directly_changed.extend(
+                    modules
+                        .iter()
+                        .filter(|module| module.starts_with("terragrunt/accounts"))
+                        .cloned(),
+                );
+                continue;
+            }
+
+            if let Some(account) = account_for_account_level_file(file) {
+                let account_dir = Utf8Path::new("terragrunt/accounts").join(account);
+                directly_changed.extend(
+                    modules
+                        .iter()
+                        .filter(|module| module.starts_with(&account_dir))
+                        .cloned(),
+                );
+                continue;
+            }
+
+            let closest_module = modules
+                .iter()
+                .filter(|module| file.starts_with(module))
+                .max_by_key(|module| module.components().count());
+            if let Some(module) = closest_module {
+                directly_changed.insert(module.clone());
+            } else {
+                warn!("No Terraform or Terragrunt module found for changed file {file}");
+            }
+        }
+
+        let directly_changed = directly_changed.into_iter().collect::<Vec<_>>();
+        let affected = self.get_dependent_modules(&directly_changed);
+        self.order_modules_prerequisites_first(&affected)
+    }
+
+    /// Order modules so every selected dependency precedes its dependents.
+    fn order_modules_prerequisites_first(&self, modules: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
+        let indices = self.module_indices();
+        let mut roots = modules
+            .iter()
+            .map(|module| indices[module.as_path()])
+            .collect::<Vec<_>>();
+        roots.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
+        let selected = roots.iter().copied().collect::<HashSet<_>>();
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::with_capacity(selected.len());
+
+        for index in roots {
+            self.visit_dependencies_first(
+                index,
+                &selected,
+                &mut visiting,
+                &mut visited,
+                &mut ordered,
+            );
+        }
+
+        ordered
+    }
+
+    fn visit_dependencies_first(
+        &self,
+        index: NodeIndex,
+        selected: &HashSet<NodeIndex>,
+        visiting: &mut HashSet<NodeIndex>,
+        visited: &mut HashSet<NodeIndex>,
+        ordered: &mut Vec<Utf8PathBuf>,
+    ) {
+        if visited.contains(&index) {
+            return;
+        }
+        assert!(
+            visiting.insert(index),
+            "dependency cycle detected at {}",
+            self.graph[index]
+        );
+
+        let mut dependencies = self
+            .graph
+            .neighbors_directed(index, Direction::Outgoing)
+            .filter(|dependency| selected.contains(dependency))
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
+        for dependency in dependencies {
+            self.visit_dependencies_first(dependency, selected, visiting, visited, ordered);
+        }
+
+        visiting.remove(&index);
+        visited.insert(index);
+        ordered.push(self.graph[index].clone());
+    }
+
     pub fn get_dependent_modules<T>(&self, modules: &[T]) -> Vec<Utf8PathBuf>
     where
         T: AsRef<Utf8Path>,
     {
-        let modules = modules.iter().map(|m| m.as_ref()).collect::<Vec<_>>();
-        let mut dependent_modules = vec![];
-        for m in modules {
-            let dependent_modules_of_dir = self.get_dependent_modules_of_dir(m);
-            dependent_modules.extend(dependent_modules_of_dir);
+        let indices = self.module_indices();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        for module in modules {
+            let module = module.as_ref();
+            let index = *indices
+                .get(module)
+                .unwrap_or_else(|| panic!("module not found in graph: {module}"));
+            if visited.insert(index) {
+                queue.push_back(index);
+            }
         }
-        remove_duplicates(dependent_modules)
-    }
 
-    pub fn get_dependent_modules_of_dir(&self, module: &Utf8Path) -> Vec<Utf8PathBuf> {
-        let module_index = self
-            .graph
-            .node_indices()
-            .find(|i| self.graph[*i] == module)
-            .expect("module not found in graph");
-        let mut dependent_modules = vec![];
+        let mut dependent_modules = Vec::new();
+        while let Some(index) = queue.pop_front() {
+            debug!("Found dependent module: {:?}", self.graph[index]);
+            dependent_modules.push(self.graph[index].clone());
 
-        let inverted_graph = self.invert_graph();
-        let mut bfs = Bfs::new(&inverted_graph, module_index);
-
-        while let Some(nx) = bfs.next(&inverted_graph) {
-            let dep = inverted_graph[nx].clone();
-            debug!("Found dependent module: {:?}", dep);
-            dependent_modules.push(dep);
+            let mut dependents = self
+                .graph
+                .neighbors_directed(index, Direction::Incoming)
+                .collect::<Vec<_>>();
+            dependents.sort_by(|left, right| self.graph[*left].cmp(&self.graph[*right]));
+            for dependent in dependents {
+                if visited.insert(dependent) {
+                    queue.push_back(dependent);
+                }
+            }
         }
 
         dependent_modules
     }
 
-    fn invert_graph(&self) -> Graph<Utf8PathBuf, i32> {
-        let mut inverted_graph = Graph::new();
-        let mut node_map = HashMap::new();
-
-        for node_index in self.graph.node_indices() {
-            let node = &self.graph[node_index];
-            let new_node_index = inverted_graph.add_node(node.clone());
-            node_map.insert(node_index, new_node_index);
-        }
-
-        for edge in self.graph.edge_indices() {
-            let (source, target) = self.graph.edge_endpoints(edge).unwrap();
-            inverted_graph.add_edge(node_map[&target], node_map[&source], 0);
-        }
-
-        inverted_graph
+    fn module_indices(&self) -> HashMap<&Utf8Path, NodeIndex> {
+        self.graph
+            .node_indices()
+            .map(|index| (self.graph[index].as_path(), index))
+            .collect()
     }
 }
 
-fn remove_duplicates(modules: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
-    let mut seen = HashSet::new();
-    let mut unique_modules = vec![];
-    for module in modules {
-        let value_was_inserted = seen.insert(module.clone());
-        if value_was_inserted {
-            unique_modules.push(module);
-        }
-        // If the value wasn't inserted it means that it was already in the set.
-        // I.e. we already saw it, so it's a duplicate.
-    }
-    unique_modules
+fn is_global_terragrunt_file(file: &Utf8Path) -> bool {
+    file.starts_with("terragrunt")
+        && !file.starts_with("terragrunt/accounts")
+        && !file.starts_with("terragrunt/modules")
+}
+
+fn account_for_account_level_file(file: &Utf8Path) -> Option<&str> {
+    let relative = file.strip_prefix("terragrunt/accounts").ok()?;
+    let mut components = relative.components();
+    let account = components.next()?.as_str();
+
+    // A file directly in the account directory affects every state in it. A
+    // file below the next component belongs to one specific state instead.
+    (components.count() == 1).then_some(account)
 }
 
 fn add_node(
@@ -254,7 +379,7 @@ fn get_relative_path(path: &Utf8Path) -> Utf8PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camino_tempfile::NamedUtf8TempFile;
+    use camino_tempfile::{NamedUtf8TempFile, Utf8TempDir};
 
     #[test]
     fn dependencies_are_read() {
@@ -265,5 +390,137 @@ mod tests {
         fs_err::write(file.path(), content).unwrap();
         let dependencies = get_dependencies(file.path());
         assert_eq!(dependencies.len(), 1);
+    }
+
+    #[test]
+    fn reusable_module_change_selects_dependent_state() {
+        let temp = Utf8TempDir::new().unwrap();
+        let reusable_module = temp.path().join("terragrunt/modules/runtime");
+        let other_module = temp.path().join("terragrunt/modules/database");
+        let dependent_state = temp
+            .path()
+            .join("terragrunt/accounts/production/billing-api");
+        let same_named_state = temp.path().join("terragrunt/accounts/production/runtime");
+
+        for directory in [
+            &reusable_module,
+            &other_module,
+            &dependent_state,
+            &same_named_state,
+        ] {
+            fs_err::create_dir_all(directory).unwrap();
+        }
+
+        let reusable_module_file = reusable_module.join("main.tf");
+        let other_module_file = other_module.join("main.tf");
+        let dependent_state_file = dependent_state.join("terragrunt.hcl");
+        let same_named_state_file = same_named_state.join("terragrunt.hcl");
+        fs_err::write(&reusable_module_file, "").unwrap();
+        fs_err::write(&other_module_file, "").unwrap();
+        fs_err::write(
+            &dependent_state_file,
+            r#"
+terraform {
+    source = "../../../modules//runtime"
+}
+"#,
+        )
+        .unwrap();
+        fs_err::write(
+            &same_named_state_file,
+            r#"
+terraform {
+    source = "../../../modules//database"
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = ModulesGraph::from_files(
+            vec![
+                reusable_module_file.clone(),
+                other_module_file,
+                dependent_state_file,
+                same_named_state_file,
+            ],
+            None,
+        );
+
+        assert_eq!(
+            graph.get_affected_modules(&[reusable_module_file]),
+            vec![reusable_module, dependent_state]
+        );
+    }
+
+    #[test]
+    fn affected_modules_are_ordered_prerequisites_first() {
+        let mut graph = Graph::new();
+        let reusable = graph.add_node(Utf8PathBuf::from("terragrunt/modules/network"));
+        let prerequisite =
+            graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/z-vpc"));
+        let middle = graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/b-cluster",
+        ));
+        let dependent = graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/a-service",
+        ));
+        graph.add_edge(prerequisite, reusable, 0);
+        graph.add_edge(middle, prerequisite, 0);
+        graph.add_edge(dependent, middle, 0);
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_affected_modules(&["terragrunt/modules/network/main.tf"]),
+            vec![
+                Utf8PathBuf::from("terragrunt/modules/network"),
+                Utf8PathBuf::from("terragrunt/accounts/production/z-vpc"),
+                Utf8PathBuf::from("terragrunt/accounts/production/b-cluster"),
+                Utf8PathBuf::from("terragrunt/accounts/production/a-service"),
+            ]
+        );
+    }
+
+    #[test]
+    fn account_config_change_selects_all_account_states() {
+        let mut graph = Graph::new();
+        graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/service-a",
+        ));
+        graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/service-b",
+        ));
+        graph.add_node(Utf8PathBuf::from("terragrunt/accounts/staging/service-a"));
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_affected_modules(&["terragrunt/accounts/production/account.json"]),
+            vec![
+                Utf8PathBuf::from("terragrunt/accounts/production/service-a"),
+                Utf8PathBuf::from("terragrunt/accounts/production/service-b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_source_traversal_deduplicates_shared_dependents() {
+        let mut graph = Graph::new();
+        let module_a = graph.add_node(Utf8PathBuf::from("terragrunt/modules/a"));
+        let module_b = graph.add_node(Utf8PathBuf::from("terragrunt/modules/b"));
+        let state = graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/service"));
+        graph.add_edge(state, module_a, 0);
+        graph.add_edge(state, module_b, 0);
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_dependent_modules(&[
+                Utf8PathBuf::from("terragrunt/modules/a"),
+                Utf8PathBuf::from("terragrunt/modules/b"),
+            ]),
+            vec![
+                Utf8PathBuf::from("terragrunt/modules/a"),
+                Utf8PathBuf::from("terragrunt/modules/b"),
+                Utf8PathBuf::from("terragrunt/accounts/production/service"),
+            ]
+        );
     }
 }

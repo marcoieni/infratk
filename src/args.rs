@@ -11,6 +11,8 @@ pub struct CliArgs {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
+    /// Apply changes from the current branch to every affected module.
+    Apply,
     /// Upgrade terragrunt states or Terraform modules.
     Upgrade(UpgradeArgs),
     /// Given a PR, run terragrunt/terraform plan on every module that changed.

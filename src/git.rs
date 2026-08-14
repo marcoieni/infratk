@@ -1,3 +1,4 @@
+use camino::Utf8PathBuf;
 use git_cmd::Repo;
 
 use crate::{cmd::Cmd, dir};
@@ -46,4 +47,41 @@ pub fn repo() -> Repo {
 pub fn git_root(repo: &Repo) -> camino::Utf8PathBuf {
     let output = repo.git(&["rev-parse", "--show-toplevel"]).unwrap();
     output.into()
+}
+
+/// Return files changed between the current working tree and the point where
+/// the current branch diverged from the repository's default branch.
+pub fn current_branch_changed_files(repo: &Repo) -> Vec<Utf8PathBuf> {
+    let default_branch = default_branch_ref(repo);
+    let merge_base = repo
+        .git(&["merge-base", "HEAD", &default_branch])
+        .expect("failed to find the merge base with the default branch");
+    let merge_base = merge_base.trim();
+    let output = repo
+        .git(&["diff", "--name-only", merge_base, "--"])
+        .expect("failed to list files changed on the current branch");
+
+    output.lines().map(Utf8PathBuf::from).collect()
+}
+
+fn default_branch_ref(repo: &Repo) -> String {
+    let output = Cmd::new(
+        "gh",
+        [
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ],
+    )
+    .with_current_dir(repo.directory())
+    .hide_stdout()
+    .run();
+    assert!(
+        output.status().success(),
+        "could not determine the repository's default branch"
+    );
+    output.stdout().to_string()
 }

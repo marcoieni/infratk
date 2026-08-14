@@ -36,6 +36,7 @@ pub struct Cmd {
     args: Vec<String>,
     current_dir: Option<Utf8PathBuf>,
     hide_stdout: bool,
+    hide_stderr: bool,
     hide_command: bool,
 }
 
@@ -54,6 +55,7 @@ impl Cmd {
             args,
             current_dir: None,
             hide_stdout: false,
+            hide_stderr: false,
             hide_command: false,
             env_vars: BTreeMap::new(),
         }
@@ -74,26 +76,20 @@ impl Cmd {
         self
     }
 
+    pub fn hide_stderr(&mut self) -> &mut Self {
+        self.hide_stderr = true;
+        self
+    }
+
     pub fn hide_command(&mut self) -> &mut Self {
         self.hide_command = true;
         self
     }
 
     pub fn run(&self) -> CmdOutput {
-        let mut to_print = format!("🚀 {} {}", self.name, self.args.join(" "));
-        let mut command = Command::new(&self.name);
-        if let Some(dir) = &self.current_dir {
-            command.current_dir(dir);
-            to_print.push_str(&format!(" 👉 {dir}"));
-        }
-        for (key, value) in &self.env_vars {
-            command.env(key, value.expose_secret());
-        }
-        if !self.hide_command {
-            println!("{to_print}");
-        }
+        let mut command = self.command();
+        self.print_command();
         let mut child = command
-            .args(&self.args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -133,7 +129,9 @@ impl Cmd {
                 output_stdout.push_str(&line);
                 output_stdout.push('\n');
             } else {
-                eprintln!("{line}");
+                if !self.hide_stderr {
+                    eprintln!("{line}");
+                }
                 output_stderr.push_str(&line);
                 output_stderr.push('\n');
             }
@@ -145,5 +143,49 @@ impl Cmd {
             stdout: output_stdout,
             stderr: output_stderr,
         }
+    }
+
+    /// Run a command attached to the terminal.
+    ///
+    /// Unlike [`Self::run`], this preserves interactive prompts such as the
+    /// confirmation requested by `terraform apply`.
+    pub fn run_interactive(&self) -> ExitStatus {
+        assert!(
+            !self.hide_stdout && !self.hide_stderr,
+            "interactive commands inherit stdout and stderr and cannot hide them"
+        );
+        let mut command = self.command();
+        self.print_command();
+
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .unwrap()
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.name);
+        command.args(&self.args);
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
+        }
+        for (key, value) in &self.env_vars {
+            command.env(key, value.expose_secret());
+        }
+        command
+    }
+
+    fn print_command(&self) {
+        if self.hide_command {
+            return;
+        }
+
+        let mut command = format!("🚀 {} {}", self.name, self.args.join(" "));
+        if let Some(dir) = &self.current_dir {
+            command.push_str(&format!(" 👉 {dir}"));
+        }
+        println!("{command}");
     }
 }
