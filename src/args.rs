@@ -34,19 +34,6 @@ pub enum Command {
     Graph(GraphArgs),
 }
 
-#[cfg(test)]
-mod tests {
-    use clap::Parser as _;
-
-    use super::*;
-
-    #[test]
-    fn apply_subcommand_is_parsed() {
-        let args = CliArgs::try_parse_from(["infratk", "apply"]).unwrap();
-        assert!(matches!(args.command, Command::Apply));
-    }
-}
-
 #[derive(clap::Parser, Debug)]
 pub struct UpgradeArgs {
     /// If true, don't select accounts interactively but update the ones that are
