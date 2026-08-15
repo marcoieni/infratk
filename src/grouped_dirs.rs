@@ -133,9 +133,29 @@ impl GroupedDirs {
         if let Some(legacy) = by_account.remove("legacy") {
             batches.push(legacy);
         }
-        batches.extend(by_account.into_values());
+        batches.extend(staging_before_production(by_account));
         batches
     }
+}
+
+fn staging_before_production<T>(mut by_account: BTreeMap<&str, T>) -> Vec<T> {
+    let accounts = by_account
+        .keys()
+        .map(|account| (*account).to_owned())
+        .collect::<Vec<_>>();
+    let mut ordered = Vec::with_capacity(by_account.len());
+    for account in accounts {
+        if let Some(prefix) = account.strip_suffix("-prod") {
+            let staging_account = format!("{prefix}-staging");
+            if let Some(staging) = by_account.remove(staging_account.as_str()) {
+                ordered.push(staging);
+            }
+        }
+        if let Some(batch) = by_account.remove(account.as_str()) {
+            ordered.push(batch);
+        }
+    }
+    ordered
 }
 
 impl GroupedDir {
@@ -234,5 +254,24 @@ mod tests {
                 vec![Utf8PathBuf::from("terragrunt/accounts/b/only")],
             ]
         );
+    }
+
+    #[test]
+    fn staging_is_ordered_before_matching_production_account() {
+        let directories = GroupedDirs {
+            directories: vec![
+                GroupedDir::new(Utf8Path::new("terragrunt/accounts/bors-prod/only")).unwrap(),
+                GroupedDir::new(Utf8Path::new("terragrunt/accounts/other/only")).unwrap(),
+                GroupedDir::new(Utf8Path::new("terragrunt/accounts/bors-staging/only")).unwrap(),
+            ],
+        };
+
+        let accounts = directories
+            .execution_batches()
+            .into_iter()
+            .map(|batch| batch[0].account())
+            .collect::<Vec<_>>();
+
+        assert_eq!(accounts, vec!["bors-staging", "bors-prod", "other"]);
     }
 }
