@@ -55,7 +55,7 @@ fn upgrade_accounts(
         // logout before login, to avoid issues with multiple profiles
         aws::sso_logout();
         let env_vars = aws::login(account.file_name().unwrap(), config);
-        let cmd_runner = CmdRunner::new(env_vars);
+        let cmd_runner = CmdRunner::new(account.file_name().unwrap(), env_vars);
         let states = list_directories_at_path(&account);
         let selected_states = select::select_states(states);
         println!("Selected states: {selected_states:?}");

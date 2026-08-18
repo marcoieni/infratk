@@ -6,6 +6,7 @@ use secrecy::SecretString;
 use crate::cmd::Cmd;
 
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
+const APPLY_CONFIRMATION_PROMPT: &str = "Enter a value:";
 
 #[derive(Debug, PartialEq)]
 pub enum PlanOutcome {
@@ -14,12 +15,16 @@ pub enum PlanOutcome {
 }
 
 pub struct CmdRunner {
+    account: String,
     env_vars: BTreeMap<String, SecretString>,
 }
 
 impl CmdRunner {
-    pub fn new(env_vars: BTreeMap<String, SecretString>) -> Self {
-        Self { env_vars }
+    pub fn new(account: impl Into<String>, env_vars: BTreeMap<String, SecretString>) -> Self {
+        Self {
+            account: account.into(),
+            env_vars,
+        }
     }
 
     pub fn terragrunt_plan(&self, state: &Utf8Path) -> PlanOutcome {
@@ -39,9 +44,16 @@ impl CmdRunner {
     }
 
     fn apply(&self, directory: &Utf8Path, command: &str, cache_directory_name: &str) {
+        let notification_message =
+            format!("{command} apply is waiting for confirmation in {directory}");
         let output = Cmd::new(command, ["apply"])
             .with_env_vars(self.env_vars.clone())
             .with_current_dir(directory)
+            .notify_on_output(
+                APPLY_CONFIRMATION_PROMPT,
+                &self.account,
+                &notification_message,
+            )
             .run_interactive_with_output();
         if output.status().success() {
             return;
@@ -69,12 +81,17 @@ impl CmdRunner {
             "{command} init failed in {directory}"
         );
 
-        let retry_status = Cmd::new(command, ["apply"])
+        let retry_output = Cmd::new(command, ["apply"])
             .with_env_vars(self.env_vars.clone())
             .with_current_dir(directory)
-            .run_interactive();
+            .notify_on_output(
+                APPLY_CONFIRMATION_PROMPT,
+                &self.account,
+                notification_message,
+            )
+            .run_interactive_with_output();
         assert!(
-            retry_status.success(),
+            retry_output.status().success(),
             "{command} apply failed after reinitializing {directory}"
         );
     }
@@ -173,7 +190,11 @@ esac
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
 
-        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        CmdRunner::new("legacy", BTreeMap::new()).apply(
+            temp.path(),
+            executable.as_str(),
+            ".terraform",
+        );
 
         assert!(!cache_directory.exists());
         assert_eq!(
