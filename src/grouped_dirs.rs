@@ -6,6 +6,7 @@ use crate::{
     aws,
     cmd_runner::{CmdRunner, PlanOutcome},
     config::Config,
+    datadog,
     dir::{self, current_dir_is_simpleinfra},
 };
 
@@ -92,15 +93,57 @@ impl GroupedDirs {
         output
     }
 
-    pub fn apply_all(&self, config: &Config) {
-        self.for_each_authenticated_directory(
-            config,
-            LoginPolicy::Reuse,
-            |cmd_runner, tool, directory| match tool {
-                Tool::Terraform => cmd_runner.terraform_apply(directory),
-                Tool::Terragrunt => cmd_runner.terragrunt_apply(directory),
-            },
-        );
+    pub async fn apply_all(&self, config: &Config) {
+        let mut datadog_config_ids = None;
+        for batch in self.execution_batches() {
+            let account = batch.first().expect("empty execution batch").account();
+            let cmd_runner = authenticated_cmd_runner(account, config, LoginPolicy::Reuse);
+            for directory in batch {
+                match directory.tool() {
+                    Tool::Terraform => cmd_runner.terraform_apply(directory.path()),
+                    Tool::Terragrunt => {
+                        if let Some(migration) =
+                            cmd_runner.pending_datadog_aws_migration(directory.path())
+                        {
+                            let config_id = if migration.requires_import() {
+                                if datadog_config_ids.is_none() {
+                                    datadog_config_ids = Some(
+                                        datadog::load_aws_account_config_ids()
+                                            .await
+                                            .unwrap_or_else(|error| {
+                                                panic!(
+                                                    "failed to prepare Datadog AWS state migration: {error:#}"
+                                                )
+                                            }),
+                                    );
+                                }
+                                Some(
+                                    datadog_config_ids
+                                        .as_ref()
+                                        .unwrap()
+                                        .get(migration.aws_account_id())
+                                        .unwrap_or_else(|| {
+                                            panic!(
+                                                "Datadog has no integration config for AWS account {}",
+                                                migration.aws_account_id()
+                                            )
+                                        })
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            };
+                            cmd_runner.complete_datadog_aws_migration(
+                                directory.path(),
+                                &migration,
+                                config_id.as_deref(),
+                            );
+                        }
+                        cmd_runner.terragrunt_apply(directory.path());
+                    }
+                }
+            }
+        }
     }
 
     fn for_each_authenticated_directory(

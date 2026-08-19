@@ -5,6 +5,7 @@ mod cmd;
 mod cmd_runner;
 mod command;
 mod config;
+mod datadog;
 mod dir;
 mod envirnoment;
 mod git;
@@ -26,7 +27,7 @@ async fn main() {
     let args = CliArgs::parse();
     let config = config::parse_config().unwrap();
     match args.command {
-        args::Command::Apply => command::apply::apply(&config),
+        args::Command::Apply => command::apply::apply(&config).await,
         args::Command::Upgrade(args) => command::upgrade::upgrade(&args, &config),
         args::Command::PlanPr(args) => command::plan_pr::plan_pr(&args, &config),
         args::Command::UpgradeProvider => {
