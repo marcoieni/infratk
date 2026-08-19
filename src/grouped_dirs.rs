@@ -174,12 +174,12 @@ impl GroupedDirs {
                 .push(directory);
         }
 
-        // Preserve the historical behavior of handling legacy credentials first.
-        let mut batches = Vec::with_capacity(by_account.len());
-        if let Some(legacy) = by_account.remove("legacy") {
+        // Apply SSO accounts before switching to the legacy credentials.
+        let legacy = by_account.remove("legacy");
+        let mut batches = staging_before_production(by_account);
+        if let Some(legacy) = legacy {
             batches.push(legacy);
         }
-        batches.extend(staging_before_production(by_account));
         batches
     }
 }
@@ -319,5 +319,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(accounts, vec!["bors-staging", "bors-prod", "other"]);
+    }
+
+    #[test]
+    fn legacy_is_ordered_last() {
+        let directories = GroupedDirs {
+            directories: vec![
+                GroupedDir::new(Utf8Path::new("terragrunt/accounts/legacy/prod")).unwrap(),
+                GroupedDir::new(Utf8Path::new("terragrunt/accounts/bors-prod/only")).unwrap(),
+                GroupedDir::new(Utf8Path::new("terraform/only")).unwrap(),
+                GroupedDir::new(Utf8Path::new("terragrunt/accounts/bors-staging/only")).unwrap(),
+            ],
+        };
+
+        let accounts = directories
+            .execution_batches()
+            .into_iter()
+            .map(|batch| batch[0].account())
+            .collect::<Vec<_>>();
+
+        assert_eq!(accounts, vec!["bors-staging", "bors-prod", "legacy"]);
     }
 }
