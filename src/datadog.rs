@@ -4,8 +4,7 @@ use anyhow::{bail, Context as _};
 
 const DEFAULT_API_URL: &str = "https://api.datadoghq.com";
 const DATADOG_ROLE_NAME: &str = "DatadogAWSIntegrationRole";
-const EXPECTED_NAMESPACE_EXCLUSIONS: [&str; 4] =
-    ["AWS/ElasticMapReduce", "AWS/Lambda", "AWS/SQS", "AWS/Usage"];
+const EXPECTED_NAMESPACE_EXCLUSIONS: [&str; 3] = ["AWS/ElasticMapReduce", "AWS/Lambda", "AWS/SQS"];
 
 #[derive(Debug)]
 pub struct AwsAccountConfigIds {
