@@ -13,7 +13,10 @@ Utility for managing Rust [simpleinfra](https://github.com/rust-lang/simpleinfra
 - Show the dependency graph of the modules
 
 The Datadog AWS state migration uses the same `DD_API_KEY`, `DD_APP_KEY`, and
-optional `DD_HOST` environment variables as the Terraform Datadog provider.
+optional `DD_HOST` environment variables as the Terraform Datadog provider. It
+audits every live AWS integration before authenticating to AWS or changing
+Terraform state, and aborts if a live setting is not represented by the new
+Terraform resource.
 
 ## Useful aliases
 

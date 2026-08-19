@@ -92,16 +92,22 @@ impl CmdRunner {
 
     /// Detect the state-only steps required when replacing the deprecated
     /// Datadog AWS integration resource with the unified account resource.
+    pub fn is_datadog_aws_migration_target(state: &Utf8Path) -> bool {
+        if state.file_name() != Some(DATADOG_AWS_STATE_DIRECTORY) {
+            return false;
+        }
+        let module_config = fs_err::read_to_string(DATADOG_AWS_MODULE_CONFIG)
+            .unwrap_or_else(|error| panic!("failed to read {DATADOG_AWS_MODULE_CONFIG}: {error}"));
+        module_config.contains(r#"resource "datadog_integration_aws_account" "aws""#)
+    }
+
+    /// Detect the state-only steps required when replacing the deprecated
+    /// Datadog AWS integration resource with the unified account resource.
     pub fn pending_datadog_aws_migration(
         &self,
         state: &Utf8Path,
     ) -> Option<PendingDatadogAwsMigration> {
-        if state.file_name() != Some(DATADOG_AWS_STATE_DIRECTORY) {
-            return None;
-        }
-        let module_config = fs_err::read_to_string(DATADOG_AWS_MODULE_CONFIG)
-            .unwrap_or_else(|error| panic!("failed to read {DATADOG_AWS_MODULE_CONFIG}: {error}"));
-        if !module_config.contains(r#"resource "datadog_integration_aws_account" "aws""#) {
+        if !Self::is_datadog_aws_migration_target(state) {
             return None;
         }
 

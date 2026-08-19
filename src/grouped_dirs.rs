@@ -94,7 +94,25 @@ impl GroupedDirs {
     }
 
     pub async fn apply_all(&self, config: &Config) {
-        let mut datadog_config_ids = None;
+        // Fetch and validate every live configuration before AWS authentication
+        // or Terraform state changes. This makes unexpected Datadog settings a
+        // fail-closed preflight rather than something discovered in an apply plan.
+        let has_datadog_aws_migration = self.directories.iter().any(|directory| {
+            matches!(directory.tool(), Tool::Terragrunt)
+                && CmdRunner::is_datadog_aws_migration_target(directory.path())
+        });
+        let datadog_config_ids = if has_datadog_aws_migration {
+            Some(
+                datadog::load_aws_account_config_ids()
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to prepare Datadog AWS state migration: {error:#}")
+                    }),
+            )
+        } else {
+            None
+        };
+
         for batch in self.execution_batches() {
             let account = batch.first().expect("empty execution batch").account();
             let cmd_runner = authenticated_cmd_runner(account, config, LoginPolicy::Reuse);
@@ -105,34 +123,19 @@ impl GroupedDirs {
                         if let Some(migration) =
                             cmd_runner.pending_datadog_aws_migration(directory.path())
                         {
-                            let config_id = if migration.requires_import() {
-                                if datadog_config_ids.is_none() {
-                                    datadog_config_ids = Some(
-                                        datadog::load_aws_account_config_ids()
-                                            .await
-                                            .unwrap_or_else(|error| {
-                                                panic!(
-                                                    "failed to prepare Datadog AWS state migration: {error:#}"
-                                                )
-                                            }),
-                                    );
-                                }
-                                Some(
-                                    datadog_config_ids
-                                        .as_ref()
-                                        .unwrap()
-                                        .get(migration.aws_account_id())
-                                        .unwrap_or_else(|| {
-                                            panic!(
-                                                "Datadog has no integration config for AWS account {}",
-                                                migration.aws_account_id()
-                                            )
-                                        })
-                                        .to_string(),
-                                )
-                            } else {
-                                None
-                            };
+                            let config_id = migration.requires_import().then(|| {
+                                datadog_config_ids
+                                    .as_ref()
+                                    .expect("Datadog migration preflight was not run")
+                                    .get(migration.aws_account_id())
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "Datadog has no integration config for AWS account {}",
+                                            migration.aws_account_id()
+                                        )
+                                    })
+                                    .to_string()
+                            });
                             cmd_runner.complete_datadog_aws_migration(
                                 directory.path(),
                                 &migration,
