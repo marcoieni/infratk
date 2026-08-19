@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Context as _};
+use tracing::warn;
 
 const DEFAULT_API_URL: &str = "https://api.datadoghq.com";
 const DATADOG_ROLE_NAME: &str = "DatadogAWSIntegrationRole";
@@ -210,7 +211,7 @@ fn config_ids_from_response(response: AwsAccountsResponse) -> anyhow::Result<Aws
             })
             .collect::<Vec<_>>()
             .join("\n");
-        bail!(
+        warn!(
             "live Datadog AWS settings are not represented by the migration Terraform configuration:\n{details}\n\
              encode these settings in Terraform before running the migration"
         );
@@ -503,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_live_settings_not_represented_in_terraform() {
+    fn warns_about_live_settings_not_represented_in_terraform() {
         let account = serde_json::from_value::<AwsAccount>(serde_json::json!({
             "id": "config-id",
             "attributes": {
@@ -541,11 +542,7 @@ mod tests {
         }))
         .unwrap();
 
-        let error = config_ids_from_response(AwsAccountsResponse {
-            data: vec![account],
-        })
-        .unwrap_err()
-        .to_string();
+        let conflicts = migration_conflicts(&account.attributes).join("\n");
         for expected in [
             "account_tags",
             "aws_regions.include_only",
@@ -561,7 +558,16 @@ mod tests {
             "resources_config.extended_collection",
             "traces_config.xray_services.include_only",
         ] {
-            assert!(error.contains(expected), "missing {expected} in {error}");
+            assert!(
+                conflicts.contains(expected),
+                "missing {expected} in {conflicts}"
+            );
         }
+
+        let config_ids = config_ids_from_response(AwsAccountsResponse {
+            data: vec![account],
+        })
+        .unwrap();
+        assert_eq!(config_ids.get("012345678901"), Some("config-id"));
     }
 }

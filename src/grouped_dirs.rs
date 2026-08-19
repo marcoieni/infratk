@@ -94,9 +94,9 @@ impl GroupedDirs {
     }
 
     pub async fn apply_all(&self, config: &Config) {
-        // Fetch and validate every live configuration before AWS authentication
-        // or Terraform state changes. This makes unexpected Datadog settings a
-        // fail-closed preflight rather than something discovered in an apply plan.
+        // Fetch and audit every live configuration before AWS authentication or
+        // Terraform state changes. Unexpected Datadog settings are warned about
+        // before the migration proceeds.
         let has_datadog_aws_migration = self.directories.iter().any(|directory| {
             matches!(directory.tool(), Tool::Terragrunt)
                 && CmdRunner::is_datadog_aws_migration_target(directory.path())
