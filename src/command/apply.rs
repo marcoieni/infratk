@@ -3,7 +3,7 @@ use crate::{
     graph::ModulesGraph, grouped_dirs::GroupedDirs,
 };
 
-pub fn apply(config: &Config) {
+pub async fn apply(config: &Config) {
     let repo = git::repo();
     let git_root = git::git_root(&repo);
     std::env::set_current_dir(&git_root).expect("failed to switch to the repository root");
@@ -38,5 +38,5 @@ pub fn apply(config: &Config) {
     }
     println!("\nTerraform/Terragrunt will show a plan and ask for confirmation for each module.");
 
-    GroupedDirs::new(&affected_modules).apply_all(config);
+    GroupedDirs::new(&affected_modules).apply_all(config).await;
 }
