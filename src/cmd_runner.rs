@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use camino::Utf8Path;
 use secrecy::SecretString;
 
-use crate::cmd::Cmd;
+use crate::{cmd::Cmd, git};
 
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
@@ -81,6 +81,14 @@ impl CmdRunner {
             "{command} init failed in {directory}"
         );
 
+        let git_status = git::working_tree_status(directory).unwrap_or_else(|error| {
+            panic!("failed to verify the repository after {command} init in {directory}: {error}")
+        });
+        assert!(
+            git_status.is_empty(),
+            "{command} init left the repository dirty; refusing to retry {command} apply:\n{git_status}"
+        );
+
         let retry_status = Cmd::new(command, ["apply"])
             .with_env_vars(self.env_vars.clone())
             .with_current_dir(directory)
@@ -156,10 +164,39 @@ fn backend_recovery(output: &crate::cmd::CmdOutput) -> Option<BackendRecovery> {
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
 
     use camino_tempfile::Utf8TempDir;
 
     use super::*;
+
+    fn commit_test_repository(directory: &Utf8Path) {
+        fs_err::write(
+            directory.join(".gitignore"),
+            "calls\ninitialized\n.terraform/\n.terragrunt-cache/\n",
+        )
+        .unwrap();
+
+        for args in [
+            &["init"][..],
+            &["config", "user.name", "Test User"],
+            &["config", "user.email", "test@example.com"],
+            &["add", "."],
+            &["commit", "-m", "test fixture"],
+        ] {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn apply_reinitializes_and_retries_when_backend_configuration_changed() {
@@ -192,6 +229,7 @@ esac
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
 
         CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
 
@@ -230,6 +268,7 @@ esac
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
 
         CmdRunner::new(BTreeMap::new()).apply(
             temp.path(),
@@ -241,6 +280,51 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_does_not_retry_when_init_changes_the_repository() {
+        let temp = Utf8TempDir::new().unwrap();
+        fs_err::write(temp.path().join(".terraform.lock.hcl"), "original\n").unwrap();
+
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    printf 'Error: Backend initialization required\n' >&2
+    exit 1
+    ;;
+  init)
+    printf 'updated\n' >> .terraform.lock.hcl
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        let result = std::panic::catch_unwind(|| {
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        });
+
+        let panic = result.expect_err("apply should abort when init changes the repository");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("init left the repository dirty"));
+        assert!(message.contains(".terraform.lock.hcl"));
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false\n"
         );
     }
 }

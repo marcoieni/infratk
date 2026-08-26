@@ -41,6 +41,15 @@ impl Repo {
     }
 }
 
+/// Return the short status of the repository containing `directory`.
+///
+/// An empty string means that the working tree and index are clean. Untracked
+/// files are included so callers can safely use this before mutating
+/// infrastructure.
+pub fn working_tree_status(directory: &Utf8Path) -> anyhow::Result<String> {
+    Repo::new(directory)?.git(&["status", "--short"])
+}
+
 fn git_in_dir(directory: &Utf8Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("git")
         .arg("-C")
