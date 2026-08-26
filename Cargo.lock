@@ -670,18 +670,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "git_cmd"
-version = "0.6.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a9a3deded8c5c18c15c8f008c96f295a74162c3a3b82fc6e367a99c131134b"
-dependencies = [
- "anyhow",
- "camino",
- "fs-err",
- "tracing",
-]
-
-[[package]]
 name = "globset"
 version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1007,7 +995,6 @@ dependencies = [
  "camino-tempfile",
  "clap",
  "fs-err",
- "git_cmd",
  "home",
  "ignore",
  "inquire",

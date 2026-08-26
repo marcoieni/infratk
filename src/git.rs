@@ -1,4 +1,6 @@
-use anyhow::Context as _;
+use std::process::Command;
+
+use anyhow::{anyhow, Context as _};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::{cmd::Cmd, dir};
@@ -11,7 +13,7 @@ pub struct Repo {
 impl Repo {
     fn new(directory: impl AsRef<Utf8Path>) -> anyhow::Result<Self> {
         let directory = directory.as_ref();
-        git_cmd::git_in_dir(directory, &["rev-parse", "--verify", "HEAD"])
+        git_in_dir(directory, &["rev-parse", "--verify", "HEAD"])
             .context("cannot initialize git repository")?;
 
         Ok(Self {
@@ -24,7 +26,7 @@ impl Repo {
     }
 
     pub fn git(&self, args: &[&str]) -> anyhow::Result<String> {
-        git_cmd::git_in_dir(&self.directory, args)
+        git_in_dir(&self.directory, args)
     }
 
     pub fn changes_except_typechanges(&self) -> anyhow::Result<Vec<String>> {
@@ -37,6 +39,39 @@ impl Repo {
             .map(str::to_string)
             .collect())
     }
+}
+
+fn git_in_dir(directory: &Utf8Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git in {directory}"))?;
+    let stdout = String::from_utf8(output.stdout)
+        .context("git produced output that was not valid UTF-8")?
+        .trim()
+        .to_string();
+
+    if output.status.success() {
+        return Ok(stdout);
+    }
+
+    let stderr = String::from_utf8(output.stderr)
+        .context("git produced an error that was not valid UTF-8")?;
+    let mut details = Vec::new();
+    if !stdout.is_empty() {
+        details.push(format!("stdout: {stdout}"));
+    }
+    if !stderr.trim().is_empty() {
+        details.push(format!("stderr: {}", stderr.trim()));
+    }
+    let details = if details.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", details.join("; "))
+    };
+    Err(anyhow!("git {args:?} failed in {directory}{details}"))
 }
 
 pub fn assert_current_branch_is_same_as_pr(pr: &str) {
@@ -130,7 +165,7 @@ mod tests {
     use super::Repo;
 
     fn git(directory: &Utf8Path, args: &[&str]) -> String {
-        git_cmd::git_in_dir(directory, args).unwrap()
+        super::git_in_dir(directory, args).unwrap()
     }
 
     #[test]
@@ -157,7 +192,7 @@ mod tests {
             &["config", "branch.feature.merge", "refs/heads/feature"],
         );
 
-        assert!(git_cmd::git_in_dir(
+        assert!(super::git_in_dir(
             directory.path(),
             &[
                 "rev-parse",
