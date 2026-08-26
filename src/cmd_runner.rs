@@ -6,6 +6,13 @@ use secrecy::SecretString;
 use crate::cmd::Cmd;
 
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
+const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
+
+#[derive(Debug, PartialEq)]
+enum BackendRecovery {
+    ConfigurationChanged,
+    InitializationRequired,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum PlanOutcome {
@@ -47,19 +54,24 @@ impl CmdRunner {
             return;
         }
 
-        assert!(
-            backend_configuration_changed(&output),
-            "{command} apply failed in {directory}"
-        );
+        let backend_recovery = backend_recovery(&output)
+            .unwrap_or_else(|| panic!("{command} apply failed in {directory}"));
 
-        let cache_directory = directory.join(cache_directory_name);
-        match fs_err::remove_dir_all(&cache_directory) {
-            Ok(()) => println!("Removed stale cache directory {cache_directory}"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+        match backend_recovery {
+            BackendRecovery::ConfigurationChanged => {
+                let cache_directory = directory.join(cache_directory_name);
+                match fs_err::remove_dir_all(&cache_directory) {
+                    Ok(()) => println!("Removed stale cache directory {cache_directory}"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+                }
+                println!("Backend configuration changed; reinitializing {directory}");
+            }
+            BackendRecovery::InitializationRequired => {
+                println!("Backend initialization required; initializing {directory}");
+            }
         }
 
-        println!("Backend configuration changed; reinitializing {directory}");
         let init_output = Cmd::new(command, ["init", "-input=false"])
             .with_env_vars(self.env_vars.clone())
             .with_current_dir(directory)
@@ -128,9 +140,17 @@ impl CmdRunner {
     }
 }
 
-fn backend_configuration_changed(output: &crate::cmd::CmdOutput) -> bool {
-    output.stdout().contains(BACKEND_CONFIGURATION_CHANGED)
-        || output.stderr().contains(BACKEND_CONFIGURATION_CHANGED)
+fn backend_recovery(output: &crate::cmd::CmdOutput) -> Option<BackendRecovery> {
+    let output_contains =
+        |message| output.stdout().contains(message) || output.stderr().contains(message);
+
+    if output_contains(BACKEND_CONFIGURATION_CHANGED) {
+        Some(BackendRecovery::ConfigurationChanged)
+    } else if output_contains(BACKEND_INITIALIZATION_REQUIRED) {
+        Some(BackendRecovery::InitializationRequired)
+    } else {
+        None
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -176,6 +196,48 @@ esac
         CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
 
         assert!(!cache_directory.exists());
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_initializes_and_retries_when_backend_initialization_is_required() {
+        let temp = Utf8TempDir::new().unwrap();
+        let cache_directory = temp.path().join(".terragrunt-cache");
+        fs_err::create_dir(&cache_directory).unwrap();
+
+        let executable = temp.path().join("fake-terragrunt");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+
+        CmdRunner::new(BTreeMap::new()).apply(
+            temp.path(),
+            executable.as_str(),
+            ".terragrunt-cache",
+        );
+
+        assert!(cache_directory.exists());
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false\napply\n"
