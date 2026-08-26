@@ -217,7 +217,7 @@ fn authenticated_cmd_runner(
             BTreeMap::default()
         }
     };
-    CmdRunner::new(env_vars)
+    CmdRunner::new(account, env_vars)
 }
 
 #[cfg(test)]
