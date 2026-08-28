@@ -7,6 +7,7 @@ use crate::{cmd::Cmd, git};
 
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
+const MAX_APPLY_RETRIES: usize = 2;
 
 #[derive(Debug, PartialEq)]
 enum BackendRecovery {
@@ -46,57 +47,58 @@ impl CmdRunner {
     }
 
     fn apply(&self, directory: &Utf8Path, command: &str, cache_directory_name: &str) {
-        let output = Cmd::new(command, ["apply"])
-            .with_env_vars(self.env_vars.clone())
-            .with_current_dir(directory)
-            .run_interactive_with_output();
-        if output.status().success() {
-            return;
-        }
+        for retry_count in 0..=MAX_APPLY_RETRIES {
+            let output = Cmd::new(command, ["apply"])
+                .with_env_vars(self.env_vars.clone())
+                .with_current_dir(directory)
+                .run_interactive_with_output();
+            if output.status().success() {
+                return;
+            }
 
-        let backend_recovery = backend_recovery(&output)
-            .unwrap_or_else(|| panic!("{command} apply failed in {directory}"));
+            if retry_count == MAX_APPLY_RETRIES {
+                panic!("{command} apply failed after {MAX_APPLY_RETRIES} retries in {directory}");
+            }
 
-        match backend_recovery {
-            BackendRecovery::ConfigurationChanged => {
-                let cache_directory = directory.join(cache_directory_name);
-                match fs_err::remove_dir_all(&cache_directory) {
-                    Ok(()) => println!("Removed stale cache directory {cache_directory}"),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+            let backend_recovery = backend_recovery(&output)
+                .unwrap_or_else(|| panic!("{command} apply failed in {directory}"));
+
+            match backend_recovery {
+                BackendRecovery::ConfigurationChanged => {
+                    let cache_directory = directory.join(cache_directory_name);
+                    match fs_err::remove_dir_all(&cache_directory) {
+                        Ok(()) => println!("Removed stale cache directory {cache_directory}"),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+                    }
+                    println!("Backend configuration changed; reinitializing {directory}");
                 }
-                println!("Backend configuration changed; reinitializing {directory}");
+                BackendRecovery::InitializationRequired => {
+                    println!("Backend initialization required; initializing {directory}");
+                }
             }
-            BackendRecovery::InitializationRequired => {
-                println!("Backend initialization required; initializing {directory}");
-            }
+
+            let init_output = Cmd::new(command, ["init", "-input=false"])
+                .with_env_vars(self.env_vars.clone())
+                .with_current_dir(directory)
+                .run();
+            assert!(
+                init_output.status().success(),
+                "{command} init failed in {directory}"
+            );
+
+            let git_status = git::working_tree_status(directory).unwrap_or_else(|error| {
+                panic!(
+                    "failed to verify the repository after {command} init in {directory}: {error}"
+                )
+            });
+            assert!(
+                git_status.is_empty(),
+                "{command} init left the repository dirty; refusing to retry {command} apply:\n{git_status}"
+            );
         }
 
-        let init_output = Cmd::new(command, ["init", "-input=false"])
-            .with_env_vars(self.env_vars.clone())
-            .with_current_dir(directory)
-            .run();
-        assert!(
-            init_output.status().success(),
-            "{command} init failed in {directory}"
-        );
-
-        let git_status = git::working_tree_status(directory).unwrap_or_else(|error| {
-            panic!("failed to verify the repository after {command} init in {directory}: {error}")
-        });
-        assert!(
-            git_status.is_empty(),
-            "{command} init left the repository dirty; refusing to retry {command} apply:\n{git_status}"
-        );
-
-        let retry_status = Cmd::new(command, ["apply"])
-            .with_env_vars(self.env_vars.clone())
-            .with_current_dir(directory)
-            .run_interactive();
-        assert!(
-            retry_status.success(),
-            "{command} apply failed after reinitializing {directory}"
-        );
+        unreachable!("apply retry loop always returns or panics");
     }
 
     /// Check if Terragrunt or Terraform plan is clean.
@@ -280,6 +282,95 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_recovers_when_backend_configuration_changes_after_initialization() {
+        let temp = Utf8TempDir::new().unwrap();
+
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    apply_count="$(grep -c '^apply$' calls)"
+    if [ "$apply_count" -eq 1 ]; then
+      printf 'Error: Backend initialization required\n' >&2
+      exit 1
+    fi
+    if [ "$apply_count" -eq 2 ]; then
+      printf 'Error: Backend configuration changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    init_count="$(grep -c '^init ' calls)"
+    if [ "$init_count" -eq 2 ] && [ -d .terraform ]; then
+      exit 2
+    fi
+    mkdir -p .terraform
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false\napply\ninit -input=false\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_stops_after_two_retries() {
+        let temp = Utf8TempDir::new().unwrap();
+
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    printf 'Error: Backend initialization required\n' >&2
+    exit 1
+    ;;
+  init)
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        let result = std::panic::catch_unwind(|| {
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        });
+
+        let panic = result.expect_err("apply should stop after two retries");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("apply failed after 2 retries"));
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false\napply\ninit -input=false\napply\n"
         );
     }
 

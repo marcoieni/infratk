@@ -145,26 +145,6 @@ impl Cmd {
         }
     }
 
-    /// Run a command attached to the terminal.
-    ///
-    /// Unlike [`Self::run`], this preserves interactive prompts such as the
-    /// confirmation requested by `terraform apply`.
-    pub fn run_interactive(&self) -> ExitStatus {
-        assert!(
-            !self.hide_stdout && !self.hide_stderr,
-            "interactive commands inherit stdout and stderr and cannot hide them"
-        );
-        let mut command = self.command();
-        self.print_command();
-
-        command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .unwrap()
-    }
-
     /// Run a command attached to the terminal while capturing its output.
     ///
     /// Output is forwarded as bytes instead of lines so prompts that do not end
