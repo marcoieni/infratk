@@ -130,7 +130,8 @@ impl GroupedDirs {
 
         // Preserve the historical behavior of handling legacy credentials first.
         let mut batches = Vec::with_capacity(by_account.len());
-        if let Some(legacy) = by_account.remove("legacy") {
+        if let Some(mut legacy) = by_account.remove("legacy") {
+            legacy.sort_by_key(|directory| !directory.is_staging());
             batches.push(legacy);
         }
         batches.extend(staging_before_production(by_account));
@@ -188,6 +189,10 @@ impl GroupedDir {
         match self {
             Self::Terraform(path) | Self::Terragrunt { path, .. } => path,
         }
+    }
+
+    fn is_staging(&self) -> bool {
+        self.path().as_str().contains("staging")
     }
 
     fn tool(&self) -> Tool {
@@ -273,5 +278,36 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(accounts, vec!["bors-staging", "bors-prod", "other"]);
+    }
+
+    #[test]
+    fn staging_module_is_ordered_first_within_legacy_account() {
+        let directories = GroupedDirs {
+            directories: vec![
+                GroupedDir::new(Utf8Path::new(
+                    "terragrunt/accounts/legacy/crates-io-prod/crates-io",
+                ))
+                .unwrap(),
+                GroupedDir::new(Utf8Path::new(
+                    "terragrunt/accounts/legacy/crates-io-staging/crates-io",
+                ))
+                .unwrap(),
+            ],
+        };
+
+        let paths = directories
+            .execution_batches()
+            .into_iter()
+            .flatten()
+            .map(|directory| directory.path())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            vec![
+                Utf8Path::new("terragrunt/accounts/legacy/crates-io-staging/crates-io"),
+                Utf8Path::new("terragrunt/accounts/legacy/crates-io-prod/crates-io"),
+            ]
+        );
     }
 }
