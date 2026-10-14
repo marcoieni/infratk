@@ -59,7 +59,7 @@ impl ModulesGraph {
     /// A change to a reusable module also selects every root module depending
     /// on it. Account-level Terragrunt configuration selects all roots in that
     /// account, while repository-level Terragrunt configuration selects roots
-    /// in every account.
+    /// in every account. Markdown documentation changes are ignored.
     pub fn get_affected_modules_containing_lockfile<T>(
         &self,
         changed_files: &[T],
@@ -82,6 +82,10 @@ impl ModulesGraph {
 
         for file in changed_files {
             let file = file.as_ref();
+            // Documentation must not trigger global, account, or module selection.
+            if matches!(file.extension(), Some("md" | "markdown")) {
+                continue;
+            }
             if is_global_terragrunt_file(file) {
                 directly_changed.extend(
                     modules
@@ -481,6 +485,82 @@ terraform {
     }
 
     #[test]
+    fn documentation_changes_do_not_select_modules() {
+        let mut graph = Graph::new();
+        graph.add_node(Utf8PathBuf::from("terragrunt"));
+        let reusable = graph.add_node(Utf8PathBuf::from("terragrunt/modules/service"));
+        let state = graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/service"));
+        graph.add_edge(state, reusable, 0);
+        let graph = ModulesGraph { graph };
+
+        // Documentation must be ignored before global, account, and closest-module
+        // selection, including documentation inside a reusable module.
+        for file in [
+            "README.md",
+            "terragrunt/README.md",
+            "terragrunt/docs/setup.markdown",
+            "terragrunt/accounts/production/README.md",
+            "terragrunt/accounts/production/service/README.md",
+            "terragrunt/modules/service/README.md",
+        ] {
+            assert!(
+                graph.get_affected_modules(&[file]).is_empty(),
+                "documentation change selected modules: {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn readme_does_not_expand_modules_selected_by_infrastructure_changes() {
+        let mut graph = Graph::new();
+        graph.add_node(Utf8PathBuf::from("terragrunt"));
+        graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/service-a",
+        ));
+        graph.add_node(Utf8PathBuf::from(
+            "terragrunt/accounts/production/service-b",
+        ));
+        graph.add_node(Utf8PathBuf::from("terragrunt/accounts/staging/service-a"));
+        let graph = ModulesGraph { graph };
+
+        assert_eq!(
+            graph.get_affected_modules(&[
+                "terragrunt/README.md",
+                "terragrunt/accounts/production/service-a/terragrunt.hcl",
+            ]),
+            vec![Utf8PathBuf::from(
+                "terragrunt/accounts/production/service-a"
+            )],
+        );
+    }
+
+    #[test]
+    fn global_config_and_helper_changes_select_all_account_states() {
+        let mut graph = Graph::new();
+        graph.add_node(Utf8PathBuf::from("terragrunt"));
+        graph.add_node(Utf8PathBuf::from("terragrunt/modules/service"));
+        graph.add_node(Utf8PathBuf::from("terragrunt/accounts/production/service"));
+        graph.add_node(Utf8PathBuf::from("terragrunt/accounts/staging/service"));
+        let graph = ModulesGraph { graph };
+
+        // Shared configuration also executes a Python helper, so limiting changes
+        // to Terraform/HCL extensions would miss infrastructure changes.
+        for file in [
+            "terragrunt/terragrunt.hcl",
+            "terragrunt/terragrunt-locals.py",
+        ] {
+            assert_eq!(
+                graph.get_affected_modules(&[file]),
+                vec![
+                    Utf8PathBuf::from("terragrunt/accounts/production/service"),
+                    Utf8PathBuf::from("terragrunt/accounts/staging/service"),
+                ],
+                "global change did not select every account: {file}",
+            );
+        }
+    }
+
+    #[test]
     fn account_config_change_selects_all_account_states() {
         let mut graph = Graph::new();
         graph.add_node(Utf8PathBuf::from(
@@ -492,13 +572,20 @@ terraform {
         graph.add_node(Utf8PathBuf::from("terragrunt/accounts/staging/service-a"));
         let graph = ModulesGraph { graph };
 
-        assert_eq!(
-            graph.get_affected_modules(&["terragrunt/accounts/production/account.json"]),
-            vec![
-                Utf8PathBuf::from("terragrunt/accounts/production/service-a"),
-                Utf8PathBuf::from("terragrunt/accounts/production/service-b"),
-            ]
-        );
+        // Deployment pins are extensionless infrastructure inputs shared by an account.
+        for file in [
+            "terragrunt/accounts/production/account.json",
+            "terragrunt/accounts/production/deployed-ref",
+        ] {
+            assert_eq!(
+                graph.get_affected_modules(&[file]),
+                vec![
+                    Utf8PathBuf::from("terragrunt/accounts/production/service-a"),
+                    Utf8PathBuf::from("terragrunt/accounts/production/service-b"),
+                ],
+                "account change did not select its states: {file}",
+            );
+        }
     }
 
     #[test]
