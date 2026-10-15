@@ -8,9 +8,7 @@ use crate::{
     git,
 };
 
-/// What Terraform prints as the last line of stdout when the user doesn't approve
-/// the apply, apart from [`RELEASING_STATE_LOCK`]. Terragrunt prints the same line
-/// after its log prefix.
+/// What Terraform prints on stdout when the user doesn't approve the apply.
 const APPLY_CANCELLED: &str = "Apply cancelled.";
 const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
@@ -195,6 +193,7 @@ impl CmdRunner {
 /// Check only the last line of stdout, because the plan printed before the prompt
 /// can contain the message too, e.g. in a file's content. Skip the line about
 /// releasing the state lock, which Terraform can print after the message.
+/// Match the end of the lines, because Terragrunt prints them after its log prefix.
 fn is_apply_cancelled(stdout: &str) -> bool {
     stdout
         .lines()
