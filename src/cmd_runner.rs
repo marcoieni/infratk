@@ -821,6 +821,11 @@ exit 1
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
+        // This test doesn't need a repository, but creating one delays running
+        // the script: right after writing it, running it can fail with "Text
+        // file busy" while a process forked by another test still holds the
+        // write handle, see rust-lang/rust#114554.
+        commit_test_repository(temp.path());
 
         let outcome =
             CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
@@ -863,6 +868,8 @@ exit 1
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
+        // Avoids "Text file busy", see `apply_reports_cancellation_without_retrying`.
+        commit_test_repository(temp.path());
 
         let result = std::panic::catch_unwind(|| {
             CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
