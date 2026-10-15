@@ -3,8 +3,12 @@ use std::collections::BTreeMap;
 use camino::Utf8Path;
 use secrecy::SecretString;
 
-use crate::{cmd::Cmd, git};
+use crate::{
+    cmd::{Cmd, CmdOutput},
+    git,
+};
 
+const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
 const MAX_APPLY_RETRIES: usize = 2;
@@ -47,6 +51,7 @@ impl CmdRunner {
     }
 
     fn apply(&self, directory: &Utf8Path, command: &str, cache_directory_name: &str) {
+        let cache_directory = directory.join(cache_directory_name);
         for retry_count in 0..=MAX_APPLY_RETRIES {
             let output = Cmd::new(command, ["apply"])
                 .with_env_vars(self.env_vars.clone())
@@ -65,7 +70,6 @@ impl CmdRunner {
 
             match backend_recovery {
                 BackendRecovery::ConfigurationChanged => {
-                    let cache_directory = directory.join(cache_directory_name);
                     match fs_err::remove_dir_all(&cache_directory) {
                         Ok(()) => println!("Removed stale cache directory {cache_directory}"),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -78,13 +82,14 @@ impl CmdRunner {
                 }
             }
 
-            // `-migrate-state` lets `init` accept an edited backend block. With `-input=false`,
-            // it does so only when no state of the cached backend has to be copied (e.g. only
-            // the locking changed), and fails otherwise.
-            let init_output = Cmd::new(command, ["init", "-input=false", "-migrate-state"])
-                .with_env_vars(self.env_vars.clone())
-                .with_current_dir(directory)
-                .run();
+            let mut init_output = self.init_migrate_state(directory, command);
+            if !init_output.status().success()
+                && output_contains(&init_output, BACKEND_CONFIG_DECODE_FAILED)
+                && remove_unset_cached_backend_settings(&cache_directory)
+            {
+                println!("Cached backend configuration updated; initializing {directory} again");
+                init_output = self.init_migrate_state(directory, command);
+            }
             assert!(
                 init_output.status().success(),
                 "{command} init failed in {directory}"
@@ -102,6 +107,16 @@ impl CmdRunner {
         }
 
         unreachable!("apply retry loop always returns or panics");
+    }
+
+    fn init_migrate_state(&self, directory: &Utf8Path, command: &str) -> CmdOutput {
+        // `-migrate-state` lets `init` accept an edited backend block. With `-input=false`,
+        // it does so only when no state of the cached backend has to be copied (e.g. only
+        // the locking changed), and fails otherwise.
+        Cmd::new(command, ["init", "-input=false", "-migrate-state"])
+            .with_env_vars(self.env_vars.clone())
+            .with_current_dir(directory)
+            .run()
     }
 
     /// Check if Terragrunt or Terraform plan is clean.
@@ -153,17 +168,69 @@ impl CmdRunner {
     }
 }
 
-fn backend_recovery(output: &crate::cmd::CmdOutput) -> Option<BackendRecovery> {
-    let output_contains =
-        |message| output.stdout().contains(message) || output.stderr().contains(message);
-
-    if output_contains(BACKEND_CONFIGURATION_CHANGED) {
+fn backend_recovery(output: &CmdOutput) -> Option<BackendRecovery> {
+    if output_contains(output, BACKEND_CONFIGURATION_CHANGED) {
         Some(BackendRecovery::ConfigurationChanged)
-    } else if output_contains(BACKEND_INITIALIZATION_REQUIRED) {
+    } else if output_contains(output, BACKEND_INITIALIZATION_REQUIRED) {
         Some(BackendRecovery::InitializationRequired)
     } else {
         None
     }
+}
+
+fn output_contains(output: &CmdOutput, message: &str) -> bool {
+    output.stdout().contains(message) || output.stderr().contains(message)
+}
+
+/// Remove the unset settings from the backend configurations that `init` cached in
+/// `cache_directory`. Returns whether any setting was removed.
+///
+/// Terraform can't decode a cached backend configuration that contains a setting
+/// its backend no longer supports, even if the setting is unset, e.g. the
+/// `assume_role_duration_seconds` that older Terraform versions cached for the
+/// S3 backend. Terraform reads omitted settings as unset, so removing the unset
+/// settings doesn't change the cached configuration, which `init -migrate-state`
+/// needs to detect whether the state would move.
+fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
+    if !cache_directory.exists() {
+        return false;
+    }
+
+    let mut removed_settings = false;
+    // `.terraform` and `.terragrunt-cache` are usually ignored by git.
+    let walker = ignore::WalkBuilder::new(cache_directory)
+        .standard_filters(false)
+        .build();
+    for entry in walker {
+        let entry = entry.expect("invalid entry");
+        let path = Utf8Path::from_path(entry.path()).expect("non UTF-8 path");
+        // Terragrunt runs Terraform in a copy of the module inside its cache.
+        let is_backend_state = path.file_name() == Some("terraform.tfstate")
+            && path.parent().and_then(Utf8Path::file_name) == Some(".terraform");
+        if !is_backend_state {
+            continue;
+        }
+
+        let content = fs_err::read_to_string(path).unwrap();
+        let mut backend_state: serde_json::Value = serde_json::from_str(&content)
+            .unwrap_or_else(|error| panic!("failed to parse {path}: {error}"));
+        let Some(config) = backend_state
+            .pointer_mut("/backend/config")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+
+        let settings_count = config.len();
+        config.retain(|_, value| !value.is_null());
+        if config.len() < settings_count {
+            let content = serde_json::to_string_pretty(&backend_state).unwrap();
+            fs_err::write(path, content).unwrap();
+            println!("Removed unset settings from the cached backend configuration {path}");
+            removed_settings = true;
+        }
+    }
+    removed_settings
 }
 
 #[cfg(all(test, unix))]
@@ -411,6 +478,207 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\n"
+        );
+    }
+
+    /// Backend configuration cached by `init` with a Terraform version whose S3
+    /// backend still supported `assume_role_duration_seconds`.
+    fn legacy_backend_state(assume_role_duration_seconds: Option<u64>) -> serde_json::Value {
+        serde_json::json!({
+            "version": 3,
+            "serial": 1,
+            "lineage": "00000000-0000-0000-0000-000000000000",
+            "backend": {
+                "type": "s3",
+                "config": {
+                    "access_key": null,
+                    "assume_role_duration_seconds": assume_role_duration_seconds,
+                    "bucket": "rust-terraform",
+                    "dynamodb_table": "terraform-state-lock",
+                    "encrypt": true,
+                    "key": "simpleinfra/bastion.tfstate",
+                    "region": "us-west-1"
+                },
+                "hash": 3_591_436_254_u64
+            },
+            "modules": [{ "path": ["root"], "outputs": {}, "resources": {}, "depends_on": [] }]
+        })
+    }
+
+    fn read_json(path: &Utf8Path) -> serde_json::Value {
+        serde_json::from_str(&fs_err::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn apply_removes_unsupported_unset_settings_from_cached_backend_configuration() {
+        let temp = Utf8TempDir::new().unwrap();
+        let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
+        fs_err::create_dir(temp.path().join(".terraform")).unwrap();
+        let legacy_state = legacy_backend_state(None);
+        fs_err::write(&backend_state_path, legacy_state.to_string()).unwrap();
+
+        // Mimics a newer Terraform after the backend block was edited: like
+        // Terraform, init fails to decode the cached backend configuration
+        // while it contains a setting that the backend no longer supports,
+        // even if the setting is unset.
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    if grep -q '"assume_role_duration_seconds"' .terraform/terraform.tfstate; then
+      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
+      exit 1
+    fi
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+
+        // `init -migrate-state` compares the cached backend configuration with
+        // the edited backend block to detect whether the state would move, so
+        // only the unset settings may be removed.
+        let mut expected_state = legacy_state;
+        let config = expected_state["backend"]["config"].as_object_mut().unwrap();
+        config.remove("access_key");
+        config.remove("assume_role_duration_seconds");
+        assert_eq!(read_json(&backend_state_path), expected_state);
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false -migrate-state\ninit -input=false -migrate-state\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_removes_unsupported_unset_settings_from_terragrunt_cache() {
+        let temp = Utf8TempDir::new().unwrap();
+        // Terragrunt runs Terraform in a copy of the module inside its cache,
+        // so the backend configuration is cached in a nested `.terraform`.
+        let terraform_directory = temp.path().join(".terragrunt-cache/abc/def/.terraform");
+        fs_err::create_dir_all(&terraform_directory).unwrap();
+        let backend_state_path = terraform_directory.join("terraform.tfstate");
+        fs_err::write(&backend_state_path, legacy_backend_state(None).to_string()).unwrap();
+
+        let executable = temp.path().join("fake-terragrunt");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    if grep -rq '"assume_role_duration_seconds"' .terragrunt-cache; then
+      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
+      exit 1
+    fi
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        CmdRunner::new(BTreeMap::new()).apply(
+            temp.path(),
+            executable.as_str(),
+            ".terragrunt-cache",
+        );
+
+        assert!(read_json(&backend_state_path)["backend"]["config"]
+            .get("assume_role_duration_seconds")
+            .is_none());
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false -migrate-state\ninit -input=false -migrate-state\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_stops_when_unsupported_cached_backend_setting_is_set() {
+        let temp = Utf8TempDir::new().unwrap();
+        let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
+        fs_err::create_dir(temp.path().join(".terraform")).unwrap();
+        fs_err::write(
+            &backend_state_path,
+            legacy_backend_state(Some(3600)).to_string(),
+        )
+        .unwrap();
+
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    if grep -q '"assume_role_duration_seconds"' .terraform/terraform.tfstate; then
+      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
+      exit 1
+    fi
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        let result = std::panic::catch_unwind(|| {
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        });
+
+        // A setting that is set affects how Terraform reads the state of the
+        // cached backend, so it must be kept and the user has to reinitialize
+        // the backend manually, as Terraform's error explains.
+        let panic = result.expect_err("apply should stop when the cached setting is set");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("init failed"));
+        assert_eq!(
+            read_json(&backend_state_path)["backend"]["config"]["assume_role_duration_seconds"],
+            3600
+        );
+        // Init runs again only because the unset `access_key` was removed.
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false -migrate-state\ninit -input=false -migrate-state\n"
         );
     }
 
