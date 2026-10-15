@@ -411,6 +411,11 @@ esac
         let temp = Utf8TempDir::new().unwrap();
         let cache_directory = temp.path().join(".terraform");
         fs_err::create_dir(&cache_directory).unwrap();
+        // The unset settings would be removed if infratk cleaned up the cache
+        // whenever init fails.
+        let backend_state_path = cache_directory.join("terraform.tfstate");
+        let legacy_state = legacy_backend_state(None).to_string();
+        fs_err::write(&backend_state_path, &legacy_state).unwrap();
 
         // Mimics Terraform after the backend block was edited to point to a
         // different state, e.g. another bucket or key. With input disabled,
@@ -471,8 +476,13 @@ esac
             .unwrap();
         assert!(message.contains("init failed"));
         // The cached backend settings are what lets init detect the state move
-        // on the next run, so they must be left in place.
-        assert!(cache_directory.exists());
+        // on the next run, so they must be left in place. infratk only touches
+        // Terraform's cache after Terraform failed to decode it, so the file
+        // must not even be rewritten.
+        assert_eq!(
+            fs_err::read_to_string(&backend_state_path).unwrap(),
+            legacy_state
+        );
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\n"
@@ -634,65 +644,6 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\ninit -input=false -migrate-state\n"
-        );
-    }
-
-    #[test]
-    fn apply_keeps_cached_backend_configuration_when_init_fails_for_another_reason() {
-        let temp = Utf8TempDir::new().unwrap();
-        let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
-        fs_err::create_dir(temp.path().join(".terraform")).unwrap();
-        // The unset settings would be removed if infratk cleaned up the cache
-        // whenever init fails.
-        let legacy_state = legacy_backend_state(None).to_string();
-        fs_err::write(&backend_state_path, &legacy_state).unwrap();
-
-        // Init decodes the cached backend configuration, but refuses to move
-        // the state, as in `apply_stops_when_backend_change_would_move_the_state`.
-        let executable = temp.path().join("fake-terraform");
-        fs_err::write(
-            &executable,
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> calls
-case "$1" in
-  apply)
-    printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
-    exit 1
-    ;;
-  init)
-    printf "Error: Can't ask approval for state migration when interactive input is disabled.\n" >&2
-    exit 1
-    ;;
-esac
-"#,
-        )
-        .unwrap();
-        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs_err::set_permissions(&executable, permissions).unwrap();
-        commit_test_repository(temp.path());
-
-        let result = std::panic::catch_unwind(|| {
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-        });
-
-        let panic = result.expect_err("apply should stop when init fails");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("init failed"));
-        // infratk should only touch Terraform's cache when Terraform refused to
-        // decode it, so the file must not even be rewritten and init must not
-        // be retried.
-        assert_eq!(
-            fs_err::read_to_string(&backend_state_path).unwrap(),
-            legacy_state
-        );
-        assert_eq!(
-            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false -migrate-state\n"
         );
     }
 
