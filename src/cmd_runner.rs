@@ -505,6 +505,30 @@ esac
         })
     }
 
+    /// Mimics a newer Terraform after the backend block was edited: like
+    /// Terraform, init fails to decode the cached backend configuration
+    /// while it contains a setting that the backend no longer supports,
+    /// even if the setting is unset. It searches both the Terraform and the
+    /// Terragrunt cache, so it can stand in for either command.
+    const FAKE_NEWER_TERRAFORM: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    if grep -rqs '"assume_role_duration_seconds"' .terraform .terragrunt-cache; then
+      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
+      exit 1
+    fi
+    : > initialized
+    ;;
+esac
+"#;
+
     fn read_json(path: &Utf8Path) -> serde_json::Value {
         serde_json::from_str(&fs_err::read_to_string(path).unwrap()).unwrap()
     }
@@ -517,33 +541,8 @@ esac
         let legacy_state = legacy_backend_state(None);
         fs_err::write(&backend_state_path, legacy_state.to_string()).unwrap();
 
-        // Mimics a newer Terraform after the backend block was edited: like
-        // Terraform, init fails to decode the cached backend configuration
-        // while it contains a setting that the backend no longer supports,
-        // even if the setting is unset.
         let executable = temp.path().join("fake-terraform");
-        fs_err::write(
-            &executable,
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> calls
-case "$1" in
-  apply)
-    if [ ! -f initialized ]; then
-      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
-      exit 1
-    fi
-    ;;
-  init)
-    if grep -q '"assume_role_duration_seconds"' .terraform/terraform.tfstate; then
-      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
-      exit 1
-    fi
-    : > initialized
-    ;;
-esac
-"#,
-        )
-        .unwrap();
+        fs_err::write(&executable, FAKE_NEWER_TERRAFORM).unwrap();
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
@@ -576,28 +575,7 @@ esac
         fs_err::write(&backend_state_path, legacy_backend_state(None).to_string()).unwrap();
 
         let executable = temp.path().join("fake-terragrunt");
-        fs_err::write(
-            &executable,
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> calls
-case "$1" in
-  apply)
-    if [ ! -f initialized ]; then
-      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
-      exit 1
-    fi
-    ;;
-  init)
-    if grep -rq '"assume_role_duration_seconds"' .terragrunt-cache; then
-      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
-      exit 1
-    fi
-    : > initialized
-    ;;
-esac
-"#,
-        )
-        .unwrap();
+        fs_err::write(&executable, FAKE_NEWER_TERRAFORM).unwrap();
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
@@ -630,28 +608,7 @@ esac
         .unwrap();
 
         let executable = temp.path().join("fake-terraform");
-        fs_err::write(
-            &executable,
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> calls
-case "$1" in
-  apply)
-    if [ ! -f initialized ]; then
-      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
-      exit 1
-    fi
-    ;;
-  init)
-    if grep -q '"assume_role_duration_seconds"' .terraform/terraform.tfstate; then
-      printf 'Error: Failed to decode current backend config\n\nThe backend configuration created by the most recent run of "terraform init" could not be decoded: unsupported attribute "assume_role_duration_seconds".\n' >&2
-      exit 1
-    fi
-    : > initialized
-    ;;
-esac
-"#,
-        )
-        .unwrap();
+        fs_err::write(&executable, FAKE_NEWER_TERRAFORM).unwrap();
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs_err::set_permissions(&executable, permissions).unwrap();
