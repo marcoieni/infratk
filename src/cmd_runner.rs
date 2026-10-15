@@ -8,6 +8,8 @@ use crate::{
     git,
 };
 
+/// What Terraform prints when the user doesn't approve the apply.
+const APPLY_CANCELLED: &str = "Apply cancelled.";
 const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
@@ -23,6 +25,13 @@ enum BackendRecovery {
 pub enum PlanOutcome {
     NoChanges,
     Changes(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ApplyOutcome {
+    Applied,
+    /// The user didn't approve the apply.
+    Cancelled,
 }
 
 pub struct CmdRunner {
@@ -42,15 +51,20 @@ impl CmdRunner {
         self.plan(module, "terraform")
     }
 
-    pub fn terragrunt_apply(&self, state: &Utf8Path) {
-        self.apply(state, "terragrunt", ".terragrunt-cache");
+    pub fn terragrunt_apply(&self, state: &Utf8Path) -> ApplyOutcome {
+        self.apply(state, "terragrunt", ".terragrunt-cache")
     }
 
-    pub fn terraform_apply(&self, module: &Utf8Path) {
-        self.apply(module, "terraform", ".terraform");
+    pub fn terraform_apply(&self, module: &Utf8Path) -> ApplyOutcome {
+        self.apply(module, "terraform", ".terraform")
     }
 
-    fn apply(&self, directory: &Utf8Path, command: &str, cache_directory_name: &str) {
+    fn apply(
+        &self,
+        directory: &Utf8Path,
+        command: &str,
+        cache_directory_name: &str,
+    ) -> ApplyOutcome {
         let cache_directory = directory.join(cache_directory_name);
         for retry_count in 0..=MAX_APPLY_RETRIES {
             let output = Cmd::new(command, ["apply"])
@@ -58,7 +72,10 @@ impl CmdRunner {
                 .with_current_dir(directory)
                 .run_interactive_with_output();
             if output.status().success() {
-                return;
+                return ApplyOutcome::Applied;
+            }
+            if output_contains(&output, APPLY_CANCELLED) {
+                return ApplyOutcome::Cancelled;
             }
 
             if retry_count == MAX_APPLY_RETRIES {
@@ -779,6 +796,38 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\n"
+        );
+    }
+
+    #[test]
+    fn apply_reports_cancellation_without_retrying() {
+        let temp = Utf8TempDir::new().unwrap();
+
+        // Mimics Terraform when the user doesn't answer "yes" to the
+        // confirmation prompt: it prints the message on stdout and exits with 1.
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+printf '\nApply cancelled.\n'
+exit 1
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+
+        let outcome =
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+
+        // The user chose not to apply, so this isn't a failure to recover from
+        // with `init`: apply must run once and let the caller decide what's next.
+        assert_eq!(outcome, ApplyOutcome::Cancelled);
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\n"
         );
     }
 }

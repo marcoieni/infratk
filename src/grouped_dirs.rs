@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::ControlFlow};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use inquire::Confirm;
 
 use crate::{
     aws,
-    cmd_runner::{CmdRunner, PlanOutcome},
+    cmd_runner::{ApplyOutcome, CmdRunner, PlanOutcome},
     config::Config,
     dir::{self, current_dir_is_simpleinfra},
 };
@@ -65,6 +66,7 @@ impl GroupedDirs {
                     Tool::Terragrunt => cmd_runner.terragrunt_plan(directory),
                 };
                 output.push((directory.to_path_buf(), outcome));
+                ControlFlow::Continue(())
             },
         );
         output
@@ -87,33 +89,50 @@ impl GroupedDirs {
                     }
                 };
                 output.push((directory.to_path_buf(), outcome));
+                ControlFlow::Continue(())
             },
         );
         output
     }
 
     pub fn apply_all(&self, config: &Config) {
+        let mut remaining_directories = self.directories.len();
         self.for_each_authenticated_directory(
             config,
             LoginPolicy::Reuse,
-            |cmd_runner, tool, directory| match tool {
-                Tool::Terraform => cmd_runner.terraform_apply(directory),
-                Tool::Terragrunt => cmd_runner.terragrunt_apply(directory),
+            |cmd_runner, tool, directory| {
+                remaining_directories -= 1;
+                let outcome = match tool {
+                    Tool::Terraform => cmd_runner.terraform_apply(directory),
+                    Tool::Terragrunt => cmd_runner.terragrunt_apply(directory),
+                };
+                if outcome == ApplyOutcome::Cancelled
+                    && remaining_directories > 0
+                    && !confirm_continue_after_cancelled_apply(directory, remaining_directories)
+                {
+                    println!("Skipping the remaining {remaining_directories} module(s).");
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
             },
         );
     }
 
+    /// Run `operation` in every directory, logging into each account before its
+    /// directories. Stops without logging into further accounts if `operation` breaks.
     fn for_each_authenticated_directory(
         &self,
         config: &Config,
         login_policy: LoginPolicy,
-        mut operation: impl FnMut(&CmdRunner, Tool, &Utf8Path),
+        mut operation: impl FnMut(&CmdRunner, Tool, &Utf8Path) -> ControlFlow<()>,
     ) {
         for batch in self.execution_batches() {
             let account = batch.first().expect("empty execution batch").account();
             let cmd_runner = authenticated_cmd_runner(account, config, login_policy);
             for directory in batch {
-                operation(&cmd_runner, directory.tool(), directory.path());
+                if operation(&cmd_runner, directory.tool(), directory.path()).is_break() {
+                    return;
+                }
             }
         }
     }
@@ -201,6 +220,18 @@ impl GroupedDir {
             Self::Terragrunt { .. } => Tool::Terragrunt,
         }
     }
+}
+
+fn confirm_continue_after_cancelled_apply(
+    directory: &Utf8Path,
+    remaining_directories: usize,
+) -> bool {
+    Confirm::new(&format!(
+        "Apply cancelled in {directory}. Continue with the remaining {remaining_directories} module(s)?"
+    ))
+    .with_default(true)
+    .prompt()
+    .unwrap_or_else(|e| panic!("failed to confirm whether to continue: {e:?}"))
 }
 
 fn authenticated_cmd_runner(
