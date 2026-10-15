@@ -8,7 +8,8 @@ use crate::{
     git,
 };
 
-/// What Terraform prints when the user doesn't approve the apply.
+/// What Terraform prints as the last line of stdout when the user doesn't approve
+/// the apply. Terragrunt prints the same line after its log prefix.
 const APPLY_CANCELLED: &str = "Apply cancelled.";
 const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
@@ -74,7 +75,9 @@ impl CmdRunner {
             if output.status().success() {
                 return ApplyOutcome::Applied;
             }
-            if output_contains(&output, APPLY_CANCELLED) {
+            // Check only the end of stdout, because the plan printed before the
+            // prompt can contain the message too, e.g. in a file's content.
+            if output.stdout().ends_with(APPLY_CANCELLED) {
                 return ApplyOutcome::Cancelled;
             }
 
@@ -829,5 +832,50 @@ exit 1
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\n"
         );
+    }
+
+    #[test]
+    fn apply_fails_when_only_the_plan_contains_the_cancellation_message() {
+        let temp = Utf8TempDir::new().unwrap();
+
+        // Mimics Terraform when the user approves an apply that then fails, and
+        // the plan printed before the prompt contains the cancellation message
+        // as an attribute value, e.g. the content of a file.
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+cat <<'EOF'
+  # local_file.notice will be created
+  + resource "local_file" "notice" {
+      + content = "Apply cancelled."
+    }
+
+Do you want to perform these actions?
+
+local_file.notice: Creating...
+EOF
+printf 'Error: failed to create local file\n' >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        });
+
+        // Reporting a cancellation would let the user continue with the next
+        // modules, even though this one failed.
+        let panic = result.expect_err("apply should fail instead of reporting a cancellation");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("apply failed in"));
     }
 }
