@@ -9,12 +9,16 @@ use crate::{
 };
 
 /// What Terraform prints as the last line of stdout when the user doesn't approve
-/// the apply. Terragrunt prints the same line after its log prefix.
+/// the apply, apart from [`RELEASING_STATE_LOCK`]. Terragrunt prints the same line
+/// after its log prefix.
 const APPLY_CANCELLED: &str = "Apply cancelled.";
 const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
 const MAX_APPLY_RETRIES: usize = 2;
+/// What Terraform prints on stdout when releasing the state lock takes a while,
+/// e.g. with a remote backend, after the rest of its output.
+const RELEASING_STATE_LOCK: &str = "Releasing state lock. This may take a few moments...";
 
 #[derive(Debug, PartialEq)]
 enum BackendRecovery {
@@ -75,9 +79,7 @@ impl CmdRunner {
             if output.status().success() {
                 return ApplyOutcome::Applied;
             }
-            // Check only the end of stdout, because the plan printed before the
-            // prompt can contain the message too, e.g. in a file's content.
-            if output.stdout().ends_with(APPLY_CANCELLED) {
+            if is_apply_cancelled(&output) {
                 return ApplyOutcome::Cancelled;
             }
 
@@ -186,6 +188,20 @@ impl CmdRunner {
             .with_current_dir(directory)
             .run();
     }
+}
+
+/// Whether the user didn't approve the apply.
+///
+/// Check only the last line of stdout, because the plan printed before the prompt
+/// can contain the message too, e.g. in a file's content. Skip the line about
+/// releasing the state lock, which Terraform can print after the message.
+fn is_apply_cancelled(output: &CmdOutput) -> bool {
+    output
+        .stdout()
+        .lines()
+        .rev()
+        .find(|line| !line.ends_with(RELEASING_STATE_LOCK))
+        .is_some_and(|line| line.ends_with(APPLY_CANCELLED))
 }
 
 fn backend_recovery(output: &CmdOutput) -> Option<BackendRecovery> {
@@ -837,6 +853,34 @@ exit 1
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\n"
         );
+    }
+
+    #[test]
+    fn apply_reports_cancellation_when_releasing_the_state_lock_is_slow() {
+        let temp = Utf8TempDir::new().unwrap();
+
+        // Mimics Terraform with a remote backend, e.g. S3: when releasing the
+        // state lock takes a while, it prints that it's doing so on stdout after
+        // the cancellation message.
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '\nApply cancelled.\nReleasing state lock. This may take a few moments...\n'
+exit 1
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        // Avoids "Text file busy", see `apply_reports_cancellation_without_retrying`.
+        commit_test_repository(temp.path());
+
+        let outcome =
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+
+        assert_eq!(outcome, ApplyOutcome::Cancelled);
     }
 
     #[test]
