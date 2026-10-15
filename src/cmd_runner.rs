@@ -596,9 +596,9 @@ esac
             ".terragrunt-cache",
         );
 
-        assert!(read_json(&backend_state_path)["backend"]["config"]
-            .get("assume_role_duration_seconds")
-            .is_none());
+        let config = &read_json(&backend_state_path)["backend"]["config"];
+        assert!(config.get("access_key").is_none());
+        assert!(config.get("assume_role_duration_seconds").is_none());
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\ninit -input=false -migrate-state\napply\n"
