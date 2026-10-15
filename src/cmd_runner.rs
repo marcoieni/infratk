@@ -352,6 +352,9 @@ esac
         // `init -migrate-state` can't ask for approval to copy the state, so it
         // fails. Without a cached backend there is nothing to compare against,
         // so init would silently attach to the new, possibly empty, state.
+        // Like Terraform, the refusing init first prints "Backend configuration
+        // changed!", so this test catches a fallback that deletes the cache and
+        // runs init again when init prints that message.
         let executable = temp.path().join("fake-terraform");
         fs_err::write(
             &executable,
@@ -371,6 +374,7 @@ case "$1" in
     fi
     case " $* " in
       *" -migrate-state "*)
+        printf 'Backend configuration changed!\n'
         printf "Error: Can't ask approval for state migration when interactive input is disabled.\n" >&2
         ;;
       *)
