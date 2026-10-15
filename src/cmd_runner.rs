@@ -109,10 +109,10 @@ impl CmdRunner {
         unreachable!("apply retry loop always returns or panics");
     }
 
+    /// Run `init` with `-migrate-state`, which lets it accept an edited backend block.
+    /// With `-input=false`, it does so only when no state of the cached backend has to
+    /// be copied (e.g. only the locking changed), and fails otherwise.
     fn init_migrate_state(&self, directory: &Utf8Path, command: &str) -> CmdOutput {
-        // `-migrate-state` lets `init` accept an edited backend block. With `-input=false`,
-        // it does so only when no state of the cached backend has to be copied (e.g. only
-        // the locking changed), and fails otherwise.
         Cmd::new(command, ["init", "-input=false", "-migrate-state"])
             .with_env_vars(self.env_vars.clone())
             .with_current_dir(directory)
