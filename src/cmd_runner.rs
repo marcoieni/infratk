@@ -490,7 +490,7 @@ esac
         );
     }
 
-    /// Backend configuration cached by `init` with a Terraform version whose S3
+    /// Backend state cached by `init` with a Terraform version whose S3
     /// backend still supported `assume_role_duration_seconds`.
     fn legacy_backend_state(assume_role_duration_seconds: Option<u64>) -> serde_json::Value {
         serde_json::json!({
