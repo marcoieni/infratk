@@ -79,7 +79,7 @@ impl CmdRunner {
             if output.status().success() {
                 return ApplyOutcome::Applied;
             }
-            if is_apply_cancelled(&output) {
+            if is_apply_cancelled(output.stdout()) {
                 return ApplyOutcome::Cancelled;
             }
 
@@ -190,14 +190,13 @@ impl CmdRunner {
     }
 }
 
-/// Whether the user didn't approve the apply.
+/// Whether the user didn't approve the apply that printed `stdout`.
 ///
 /// Check only the last line of stdout, because the plan printed before the prompt
 /// can contain the message too, e.g. in a file's content. Skip the line about
 /// releasing the state lock, which Terraform can print after the message.
-fn is_apply_cancelled(output: &CmdOutput) -> bool {
-    output
-        .stdout()
+fn is_apply_cancelled(stdout: &str) -> bool {
+    stdout
         .lines()
         .rev()
         .find(|line| !line.ends_with(RELEASING_STATE_LOCK))
@@ -856,34 +855,6 @@ exit 1
     }
 
     #[test]
-    fn apply_reports_cancellation_when_releasing_the_state_lock_is_slow() {
-        let temp = Utf8TempDir::new().unwrap();
-
-        // Mimics Terraform with a remote backend, e.g. S3: when releasing the
-        // state lock takes a while, it prints that it's doing so on stdout after
-        // the cancellation message.
-        let executable = temp.path().join("fake-terraform");
-        fs_err::write(
-            &executable,
-            r#"#!/bin/sh
-printf '\nApply cancelled.\nReleasing state lock. This may take a few moments...\n'
-exit 1
-"#,
-        )
-        .unwrap();
-        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs_err::set_permissions(&executable, permissions).unwrap();
-        // Avoids "Text file busy", see `apply_reports_cancellation_without_retrying`.
-        commit_test_repository(temp.path());
-
-        let outcome =
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-
-        assert_eq!(outcome, ApplyOutcome::Cancelled);
-    }
-
-    #[test]
     fn apply_fails_when_only_the_plan_contains_the_cancellation_message() {
         let temp = Utf8TempDir::new().unwrap();
 
@@ -928,5 +899,16 @@ exit 1
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap();
         assert!(message.contains("apply failed in"));
+    }
+
+    #[test]
+    fn apply_is_cancelled_when_releasing_the_state_lock_is_slow() {
+        // Mimics Terraform with a remote backend, e.g. S3: when releasing the
+        // state lock takes a while, it prints that it's doing so on stdout after
+        // the cancellation message.
+        let stdout = "Apply cancelled.
+Releasing state lock. This may take a few moments...";
+
+        assert!(is_apply_cancelled(stdout));
     }
 }
