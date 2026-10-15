@@ -9,7 +9,7 @@ const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
 const MAX_APPLY_RETRIES: usize = 2;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum BackendRecovery {
     ConfigurationChanged,
     InitializationRequired,
@@ -62,30 +62,7 @@ impl CmdRunner {
 
             let backend_recovery = backend_recovery(&output)
                 .unwrap_or_else(|| panic!("{command} apply failed in {directory}"));
-
-            match backend_recovery {
-                BackendRecovery::ConfigurationChanged => {
-                    let cache_directory = directory.join(cache_directory_name);
-                    match fs_err::remove_dir_all(&cache_directory) {
-                        Ok(()) => println!("Removed stale cache directory {cache_directory}"),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => panic!("failed to remove {cache_directory}: {error}"),
-                    }
-                    println!("Backend configuration changed; reinitializing {directory}");
-                }
-                BackendRecovery::InitializationRequired => {
-                    println!("Backend initialization required; initializing {directory}");
-                }
-            }
-
-            let init_output = Cmd::new(command, ["init", "-input=false"])
-                .with_env_vars(self.env_vars.clone())
-                .with_current_dir(directory)
-                .run();
-            assert!(
-                init_output.status().success(),
-                "{command} init failed in {directory}"
-            );
+            self.recover_backend(directory, command, cache_directory_name, backend_recovery);
 
             let git_status = git::working_tree_status(directory).unwrap_or_else(|error| {
                 panic!(
@@ -99,6 +76,55 @@ impl CmdRunner {
         }
 
         unreachable!("apply retry loop always returns or panics");
+    }
+
+    fn recover_backend(
+        &self,
+        directory: &Utf8Path,
+        command: &str,
+        cache_directory_name: &str,
+        recovery: BackendRecovery,
+    ) {
+        match recovery {
+            BackendRecovery::ConfigurationChanged => {
+                let cache_directory = directory.join(cache_directory_name);
+                match fs_err::remove_dir_all(&cache_directory) {
+                    Ok(()) => println!("Removed stale cache directory {cache_directory}"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+                }
+                println!("Backend configuration changed; reinitializing {directory}");
+            }
+            BackendRecovery::InitializationRequired => {
+                println!("Backend initialization required; initializing {directory}");
+            }
+        }
+
+        let init_output = Cmd::new(command, ["init", "-input=false"])
+            .with_env_vars(self.env_vars.clone())
+            .with_current_dir(directory)
+            .run();
+        if init_output.status().success() {
+            return;
+        }
+
+        // `terraform apply` reports an edited backend block only as
+        // "Backend initialization required". `terraform init` then refuses to
+        // proceed with "Backend configuration changed" until the backend
+        // settings cached from the previous configuration are discarded.
+        if recovery == BackendRecovery::InitializationRequired
+            && backend_recovery(&init_output) == Some(BackendRecovery::ConfigurationChanged)
+        {
+            self.recover_backend(
+                directory,
+                command,
+                cache_directory_name,
+                BackendRecovery::ConfigurationChanged,
+            );
+            return;
+        }
+
+        panic!("{command} init failed in {directory}");
     }
 
     /// Check if Terragrunt or Terraform plan is clean.
@@ -282,6 +308,56 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_reinitializes_when_init_reports_backend_configuration_changed() {
+        let temp = Utf8TempDir::new().unwrap();
+        // The cache directory stores the backend settings of the previous
+        // configuration, e.g. before switching from DynamoDB to S3 locking.
+        let cache_directory = temp.path().join(".terraform");
+        fs_err::create_dir(&cache_directory).unwrap();
+
+        // Mimics Terraform after the backend block was edited: `apply` only asks
+        // for initialization, and `init` refuses to run while the cached backend
+        // settings differ from the configuration.
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    if [ -d .terraform ]; then
+      printf 'Error: Backend configuration changed\n' >&2
+      exit 1
+    fi
+    : > initialized
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+
+        // The first init fails, so the stale cache must be discarded before the
+        // second init can succeed, all within a single apply retry.
+        assert!(!cache_directory.exists());
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false\ninit -input=false\napply\n"
         );
     }
 
