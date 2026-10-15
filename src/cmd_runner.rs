@@ -411,8 +411,10 @@ esac
         let temp = Utf8TempDir::new().unwrap();
         let cache_directory = temp.path().join(".terraform");
         fs_err::create_dir(&cache_directory).unwrap();
-        // The unset settings would be removed if infratk cleaned up the cache
-        // whenever init fails.
+        // Cache unset settings, which infratk removes when init fails to decode
+        // the cached backend configuration. The fake Terraform below stands for
+        // a version that can still decode `assume_role_duration_seconds`, so it
+        // never reports that error.
         let backend_state_path = cache_directory.join("terraform.tfstate");
         let legacy_state = legacy_backend_state(None).to_string();
         fs_err::write(&backend_state_path, &legacy_state).unwrap();
@@ -476,9 +478,8 @@ esac
             .unwrap();
         assert!(message.contains("init failed"));
         // The cached backend settings are what lets init detect the state move
-        // on the next run, so they must be left in place. infratk only touches
-        // Terraform's cache after Terraform failed to decode it, so the file
-        // must not even be rewritten.
+        // on the next run, so they must be left in place. Since init didn't fail
+        // to decode them, the file must not even be rewritten.
         assert_eq!(
             fs_err::read_to_string(&backend_state_path).unwrap(),
             legacy_state
