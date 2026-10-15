@@ -78,10 +78,9 @@ impl CmdRunner {
                 }
             }
 
-            // After the backend block is edited, `init` refuses with "Backend configuration
-            // changed" unless told how to handle the state. `-migrate-state` accepts the new
-            // configuration when it still points to the same state. Since input is disabled,
-            // init fails instead of copying the state when the state would move.
+            // `-migrate-state` lets `init` accept an edited backend block. With `-input=false`,
+            // it does so only when no state of the cached backend has to be copied (e.g. only
+            // the locking changed), and fails otherwise.
             let init_output = Cmd::new(command, ["init", "-input=false", "-migrate-state"])
                 .with_env_vars(self.env_vars.clone())
                 .with_current_dir(directory)
@@ -334,8 +333,7 @@ esac
 
         CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
 
-        // The cache also holds the providers, modules and selected workspace,
-        // so recovering from a backend change must not discard it.
+        // Keeping the cache preserves the providers, modules and selected workspace.
         assert!(cache_directory.exists());
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
