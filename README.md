@@ -9,7 +9,9 @@ Utility for managing Rust [simpleinfra](https://github.com/rust-lang/simpleinfra
   confirmation prompt. Fetches the default branch from `origin` before calculating
   changes, using the updated remote reference as the comparison base. Ignores
   Markdown documentation changes when selecting affected modules. Reinitializes
-  modules whose backend configuration changed, without migrating state
+  modules whose backend configuration changed, without migrating state.
+  Asks whether to continue with the remaining modules after you decline a
+  module's apply
 - Update Terragrunt states verifying that the changes don't edit the state
 - Run `plan` for every lockfile of a PR
 - Show the dependency graph of the modules
