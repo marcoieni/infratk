@@ -542,7 +542,7 @@ esac
     }
 
     #[test]
-    fn apply_removes_unsupported_unset_settings_from_cached_backend_configuration() {
+    fn apply_removes_unset_settings_from_undecodable_terraform_cache() {
         let temp = Utf8TempDir::new().unwrap();
         let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
         fs_err::create_dir(temp.path().join(".terraform")).unwrap();
@@ -573,7 +573,7 @@ esac
     }
 
     #[test]
-    fn apply_removes_unsupported_unset_settings_from_terragrunt_cache() {
+    fn apply_removes_unset_settings_from_undecodable_terragrunt_cache() {
         let temp = Utf8TempDir::new().unwrap();
         // Terragrunt runs Terraform in a copy of the module inside its cache,
         // so the backend configuration is cached in a nested `.terraform`.
