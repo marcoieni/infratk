@@ -911,4 +911,39 @@ Releasing state lock. This may take a few moments...";
 
         assert!(is_apply_cancelled(stdout));
     }
+
+    #[test]
+    fn apply_is_cancelled_when_terragrunt_prefixes_the_output() {
+        // Terragrunt prints each line of Terraform's stdout after its log prefix,
+        // so neither message is a whole line.
+        let stdout = "12:00:00.000 STDOUT terraform: Apply cancelled.
+12:00:00.500 STDOUT terraform: Releasing state lock. This may take a few moments...";
+
+        assert!(is_apply_cancelled(stdout));
+    }
+
+    #[test]
+    fn apply_is_not_cancelled_when_a_line_of_the_plan_ends_with_the_cancellation_message() {
+        // Mimics Terraform when the user approves an apply that then fails, and
+        // the plan printed before the prompt contains the cancellation message
+        // on its own line, e.g. in the content of a file.
+        let stdout = r#"Terraform will perform the following actions:
+
+  # local_file.notice will be created
+  + resource "local_file" "notice" {
+      + content  = <<-EOT
+            Apply cancelled.
+        EOT
+      + filename = "notice.txt"
+    }
+
+Do you want to perform these actions?
+
+local_file.notice: Creating...
+Releasing state lock. This may take a few moments..."#;
+
+        // Reporting a cancellation would let the user continue with the next
+        // modules, even though this one failed.
+        assert!(!is_apply_cancelled(stdout));
+    }
 }
