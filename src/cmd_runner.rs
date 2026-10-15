@@ -9,7 +9,7 @@ const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
 const MAX_APPLY_RETRIES: usize = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum BackendRecovery {
     ConfigurationChanged,
     InitializationRequired,
@@ -62,7 +62,34 @@ impl CmdRunner {
 
             let backend_recovery = backend_recovery(&output)
                 .unwrap_or_else(|| panic!("{command} apply failed in {directory}"));
-            self.recover_backend(directory, command, cache_directory_name, backend_recovery);
+
+            match backend_recovery {
+                BackendRecovery::ConfigurationChanged => {
+                    let cache_directory = directory.join(cache_directory_name);
+                    match fs_err::remove_dir_all(&cache_directory) {
+                        Ok(()) => println!("Removed stale cache directory {cache_directory}"),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+                    }
+                    println!("Backend configuration changed; reinitializing {directory}");
+                }
+                BackendRecovery::InitializationRequired => {
+                    println!("Backend initialization required; initializing {directory}");
+                }
+            }
+
+            // After the backend block is edited, `init` refuses with "Backend configuration
+            // changed" unless told how to handle the state. `-migrate-state` accepts the new
+            // configuration when it still points to the same state. Since input is disabled,
+            // init fails instead of copying the state when the state would move.
+            let init_output = Cmd::new(command, ["init", "-input=false", "-migrate-state"])
+                .with_env_vars(self.env_vars.clone())
+                .with_current_dir(directory)
+                .run();
+            assert!(
+                init_output.status().success(),
+                "{command} init failed in {directory}"
+            );
 
             let git_status = git::working_tree_status(directory).unwrap_or_else(|error| {
                 panic!(
@@ -76,55 +103,6 @@ impl CmdRunner {
         }
 
         unreachable!("apply retry loop always returns or panics");
-    }
-
-    fn recover_backend(
-        &self,
-        directory: &Utf8Path,
-        command: &str,
-        cache_directory_name: &str,
-        recovery: BackendRecovery,
-    ) {
-        match recovery {
-            BackendRecovery::ConfigurationChanged => {
-                let cache_directory = directory.join(cache_directory_name);
-                match fs_err::remove_dir_all(&cache_directory) {
-                    Ok(()) => println!("Removed stale cache directory {cache_directory}"),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => panic!("failed to remove {cache_directory}: {error}"),
-                }
-                println!("Backend configuration changed; reinitializing {directory}");
-            }
-            BackendRecovery::InitializationRequired => {
-                println!("Backend initialization required; initializing {directory}");
-            }
-        }
-
-        let init_output = Cmd::new(command, ["init", "-input=false"])
-            .with_env_vars(self.env_vars.clone())
-            .with_current_dir(directory)
-            .run();
-        if init_output.status().success() {
-            return;
-        }
-
-        // `terraform apply` reports an edited backend block only as
-        // "Backend initialization required". `terraform init` then refuses to
-        // proceed with "Backend configuration changed" until the backend
-        // settings cached from the previous configuration are discarded.
-        if recovery == BackendRecovery::InitializationRequired
-            && backend_recovery(&init_output) == Some(BackendRecovery::ConfigurationChanged)
-        {
-            self.recover_backend(
-                directory,
-                command,
-                cache_directory_name,
-                BackendRecovery::ConfigurationChanged,
-            );
-            return;
-        }
-
-        panic!("{command} init failed in {directory}");
     }
 
     /// Check if Terragrunt or Terraform plan is clean.
@@ -264,7 +242,7 @@ esac
         assert!(!cache_directory.exists());
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false\napply\n"
+            "apply\ninit -input=false -migrate-state\napply\n"
         );
     }
 
@@ -307,12 +285,12 @@ esac
         assert!(cache_directory.exists());
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false\napply\n"
+            "apply\ninit -input=false -migrate-state\napply\n"
         );
     }
 
     #[test]
-    fn apply_reinitializes_when_init_reports_backend_configuration_changed() {
+    fn apply_reinitializes_when_backend_change_keeps_the_same_state() {
         let temp = Utf8TempDir::new().unwrap();
         // The cache directory stores the backend settings of the previous
         // configuration, e.g. before switching from DynamoDB to S3 locking.
@@ -320,8 +298,9 @@ esac
         fs_err::create_dir(&cache_directory).unwrap();
 
         // Mimics Terraform after the backend block was edited: `apply` only asks
-        // for initialization, and `init` refuses to run while the cached backend
-        // settings differ from the configuration.
+        // for initialization, and `init` refuses with "Backend configuration
+        // changed" unless `-migrate-state` tells it how to handle the state.
+        // Because the state stays in place, `-migrate-state` lets init succeed.
         let executable = temp.path().join("fake-terraform");
         fs_err::write(
             &executable,
@@ -335,10 +314,13 @@ case "$1" in
     fi
     ;;
   init)
-    if [ -d .terraform ]; then
-      printf 'Error: Backend configuration changed\n' >&2
-      exit 1
-    fi
+    case " $* " in
+      *" -migrate-state "*) ;;
+      *)
+        printf 'Error: Backend configuration changed\n' >&2
+        exit 1
+        ;;
+    esac
     : > initialized
     ;;
 esac
@@ -352,12 +334,81 @@ esac
 
         CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
 
-        // The first init fails, so the stale cache must be discarded before the
-        // second init can succeed, all within a single apply retry.
-        assert!(!cache_directory.exists());
+        // The cache also holds the providers, modules and selected workspace,
+        // so recovering from a backend change must not discard it.
+        assert!(cache_directory.exists());
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false\ninit -input=false\napply\n"
+            "apply\ninit -input=false -migrate-state\napply\n"
+        );
+    }
+
+    #[test]
+    fn apply_stops_when_backend_change_would_move_the_state() {
+        let temp = Utf8TempDir::new().unwrap();
+        let cache_directory = temp.path().join(".terraform");
+        fs_err::create_dir(&cache_directory).unwrap();
+
+        // Mimics Terraform after the backend block was edited to point to a
+        // different state, e.g. another bucket or key. With input disabled,
+        // `init -migrate-state` can't ask for approval to copy the state, so it
+        // fails. Without a cached backend there is nothing to compare against,
+        // so init would silently attach to the new, possibly empty, state.
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> calls
+case "$1" in
+  apply)
+    if [ ! -f initialized ]; then
+      printf 'Error: Backend initialization required, please run "terraform init"\n\nReason: Backend configuration block has changed\n' >&2
+      exit 1
+    fi
+    ;;
+  init)
+    if [ ! -d .terraform ]; then
+      : > initialized
+      exit 0
+    fi
+    case " $* " in
+      *" -migrate-state "*)
+        printf "Error: Can't ask approval for state migration when interactive input is disabled.\n" >&2
+        ;;
+      *)
+        printf 'Error: Backend configuration changed\n' >&2
+        ;;
+    esac
+    exit 1
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        let result = std::panic::catch_unwind(|| {
+            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        });
+
+        // Moving the state needs a manual migration, so apply must stop
+        // before running against the new state.
+        let panic = result.expect_err("apply should stop when the state would move");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("init failed"));
+        // The cached backend settings are what lets init detect the state move
+        // on the next run, so they must be left in place.
+        assert!(cache_directory.exists());
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false -migrate-state\n"
         );
     }
 
@@ -403,7 +454,7 @@ esac
 
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false\napply\ninit -input=false\napply\n"
+            "apply\ninit -input=false -migrate-state\napply\ninit -input=false -migrate-state\napply\n"
         );
     }
 
@@ -446,7 +497,7 @@ esac
         assert!(message.contains("apply failed after 2 retries"));
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false\napply\ninit -input=false\napply\n"
+            "apply\ninit -input=false -migrate-state\napply\ninit -input=false -migrate-state\napply\n"
         );
     }
 
@@ -491,7 +542,7 @@ esac
         assert!(message.contains(".terraform.lock.hcl"));
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
-            "apply\ninit -input=false\n"
+            "apply\ninit -input=false -migrate-state\n"
         );
     }
 }
