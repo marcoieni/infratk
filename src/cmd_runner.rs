@@ -197,20 +197,18 @@ fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
     }
 
     let mut removed_settings = false;
-    // `.terraform` and `.terragrunt-cache` are usually ignored by git.
+    // Terragrunt runs Terraform in a copy of the module inside its cache, so search
+    // it recursively, including the hidden and git-ignored `.terraform` directories.
     let walker = ignore::WalkBuilder::new(cache_directory)
         .standard_filters(false)
         .build();
     for entry in walker {
         let entry = entry.expect("invalid entry");
-        let path = Utf8Path::from_path(entry.path()).expect("non UTF-8 path");
-        // Terragrunt runs Terraform in a copy of the module inside its cache.
-        let is_backend_state = path.file_name() == Some("terraform.tfstate")
-            && path.parent().and_then(Utf8Path::file_name) == Some(".terraform");
-        if !is_backend_state {
+        if !entry.path().ends_with(".terraform/terraform.tfstate") {
             continue;
         }
 
+        let path = Utf8Path::from_path(entry.path()).expect("non UTF-8 path");
         let content = fs_err::read_to_string(path).unwrap();
         let mut backend_state: serde_json::Value = serde_json::from_str(&content)
             .unwrap_or_else(|error| panic!("failed to parse {path}: {error}"));
