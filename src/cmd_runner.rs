@@ -649,20 +649,27 @@ esac
     }
 
     #[test]
-    fn apply_returns_error_when_cached_backend_configuration_is_invalid() {
+    fn apply_returns_error_when_a_cached_backend_configuration_is_invalid() {
         let temp = Utf8TempDir::new().unwrap();
-        let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
-        fs_err::create_dir(temp.path().join(".terraform")).unwrap();
-        // When init fails to decode the cached backend configuration, apply
-        // parses every copy, so it can meet a corrupt stale one in a Terragrunt
-        // cache. The fake's init just greps for the setting, so it still fails.
+        // Terragrunt keeps every copy of the module it downloaded, e.g. before
+        // and after the module source changed, so its cache can hold stale
+        // copies besides the one Terraform runs in.
+        let current_directory = temp.path().join(".terragrunt-cache/abc/def/.terraform");
+        fs_err::create_dir_all(&current_directory).unwrap();
+        let legacy_state = legacy_backend_state(None).to_string();
+        fs_err::write(current_directory.join("terraform.tfstate"), &legacy_state).unwrap();
+        // When init fails to decode the current copy, apply parses the backend
+        // configuration of every copy, so it can meet a corrupt stale one.
+        let stale_directory = temp.path().join(".terragrunt-cache/abc/ghi/.terraform");
+        fs_err::create_dir_all(&stale_directory).unwrap();
+        let stale_backend_state_path = stale_directory.join("terraform.tfstate");
         fs_err::write(
-            &backend_state_path,
-            r#"{"backend": {"type": "s3", "config": {"assume_role_duration_seconds": null,"#,
+            &stale_backend_state_path,
+            &legacy_state[..legacy_state.len() / 2],
         )
         .unwrap();
 
-        let executable = temp.path().join("fake-terraform");
+        let executable = temp.path().join("fake-terragrunt");
         fs_err::write(&executable, FAKE_NEWER_TERRAFORM).unwrap();
         let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -670,16 +677,17 @@ esac
         commit_test_repository(temp.path());
 
         let error = CmdRunner::new(BTreeMap::new())
-            .apply(temp.path(), executable.as_str(), ".terraform")
-            .expect_err("apply should fail when the cached backend configuration is invalid");
+            .apply(temp.path(), executable.as_str(), ".terragrunt-cache")
+            .expect_err("apply should fail when a cached backend configuration is invalid");
 
-        // A corrupt cache only breaks this module, so apply must return an
+        // A corrupt copy only breaks this module, so apply must return an
         // error instead of panicking, letting the caller ask whether to
         // continue with the remaining modules. The message names the file
         // the user has to fix.
         let message = error.to_string();
-        assert!(message.contains(&format!("failed to parse {backend_state_path}")));
-        // Apply stops on the parse error instead of running init again.
+        assert!(message.contains(&format!("failed to parse {stale_backend_state_path}")));
+        // Whichever copy apply parses first, it stops on the parse error
+        // instead of running init again.
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\n"
