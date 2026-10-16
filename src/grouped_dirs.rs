@@ -95,7 +95,8 @@ impl GroupedDirs {
         output
     }
 
-    pub fn apply_all(&self, config: &Config) {
+    /// Returns the directories whose apply didn't succeed.
+    pub fn apply_all(&self, config: &Config) -> Vec<Utf8PathBuf> {
         let mut remaining_directories = self.directories.len();
         let mut failed_directories = Vec::new();
         self.for_each_authenticated_directory(
@@ -120,13 +121,7 @@ impl GroupedDirs {
                 ControlFlow::Continue(())
             },
         );
-
-        if !failed_directories.is_empty() {
-            println!("\nApply didn't succeed in:");
-            for directory in failed_directories {
-                println!("  {directory}");
-            }
-        }
+        failed_directories
     }
 
     /// Run `operation` in every directory, logging into each account before its
