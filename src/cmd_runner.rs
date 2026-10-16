@@ -8,13 +8,15 @@ use crate::{
     git,
 };
 
-/// What Terraform prints as the last line of stdout when the user doesn't approve
-/// the apply. Terragrunt prints the same line after its log prefix.
+/// What Terraform prints on stdout when the user doesn't approve the apply.
 const APPLY_CANCELLED: &str = "Apply cancelled.";
 const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
 const MAX_APPLY_RETRIES: usize = 2;
+/// What Terraform prints on stdout when releasing the state lock takes a while,
+/// e.g. with a remote backend, after the rest of its output.
+const RELEASING_STATE_LOCK: &str = "Releasing state lock. This may take a few moments...";
 
 #[derive(Debug, PartialEq)]
 enum BackendRecovery {
@@ -75,9 +77,7 @@ impl CmdRunner {
             if output.status().success() {
                 return ApplyOutcome::Applied;
             }
-            // Check only the end of stdout, because the plan printed before the
-            // prompt can contain the message too, e.g. in a file's content.
-            if output.stdout().ends_with(APPLY_CANCELLED) {
+            if is_apply_cancelled(output.stdout()) {
                 return ApplyOutcome::Cancelled;
             }
 
@@ -186,6 +186,20 @@ impl CmdRunner {
             .with_current_dir(directory)
             .run();
     }
+}
+
+/// Whether the user didn't approve the apply that printed `stdout`.
+///
+/// Check only the last line of stdout, because the plan printed before the prompt
+/// can contain the message too, e.g. in a file's content. Skip the line about
+/// releasing the state lock, which Terraform can print after the message.
+/// Match the end of the lines, because Terragrunt prints them after its log prefix.
+fn is_apply_cancelled(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .rev()
+        .find(|line| !line.ends_with(RELEASING_STATE_LOCK))
+        .is_some_and(|line| line.ends_with(APPLY_CANCELLED))
 }
 
 fn backend_recovery(output: &CmdOutput) -> Option<BackendRecovery> {
@@ -884,5 +898,51 @@ exit 1
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap();
         assert!(message.contains("apply failed in"));
+    }
+
+    #[test]
+    fn apply_is_cancelled_when_releasing_the_state_lock_is_slow() {
+        // Mimics Terraform with a remote backend, e.g. S3: when releasing the
+        // state lock takes a while, it prints that it's doing so on stdout after
+        // the cancellation message.
+        let stdout = "Apply cancelled.
+Releasing state lock. This may take a few moments...";
+
+        assert!(is_apply_cancelled(stdout));
+    }
+
+    #[test]
+    fn apply_is_cancelled_when_terragrunt_prefixes_the_output() {
+        // Terragrunt prints each line of Terraform's stdout after its log prefix,
+        // so neither message is a whole line.
+        let stdout = "12:00:00.000 STDOUT terraform: Apply cancelled.
+12:00:00.500 STDOUT terraform: Releasing state lock. This may take a few moments...";
+
+        assert!(is_apply_cancelled(stdout));
+    }
+
+    #[test]
+    fn apply_is_not_cancelled_when_a_line_of_the_plan_ends_with_the_cancellation_message() {
+        // Mimics Terraform when the user approves an apply that then fails, and
+        // the plan printed before the prompt contains the cancellation message
+        // on its own line, e.g. in the content of a file.
+        let stdout = r#"Terraform will perform the following actions:
+
+  # local_file.notice will be created
+  + resource "local_file" "notice" {
+      + content  = <<-EOT
+            Apply cancelled.
+        EOT
+      + filename = "notice.txt"
+    }
+
+Do you want to perform these actions?
+
+local_file.notice: Creating...
+Releasing state lock. This may take a few moments..."#;
+
+        // Reporting a cancellation would let the user continue with the next
+        // modules, even though this one failed.
+        assert!(!is_apply_cancelled(stdout));
     }
 }
