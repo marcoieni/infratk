@@ -778,7 +778,7 @@ esac
         let temp = Utf8TempDir::new().unwrap();
 
         // Mimics Terraform when the user doesn't answer "yes" to the
-        // confirmation prompt: it prints the message on stdout and exits with 1.
+        // confirmation prompt: it exits with 1 without reporting a backend error.
         let executable = temp.path().join("fake-terraform");
         fs_err::write(
             &executable,
@@ -798,12 +798,15 @@ exit 1
         // write handle, see rust-lang/rust#114554.
         commit_test_repository(temp.path());
 
-        let result =
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should fail when the user declines");
 
-        // The user chose not to apply, so this isn't a failure to recover from
-        // with `init`: apply must run once and let the caller decide what's next.
-        assert!(result.is_err());
+        // Only backend errors can be fixed by running `init`, so any other
+        // failure must be returned after a single apply, letting the caller
+        // ask whether to continue with the remaining modules. The message
+        // tells this failure apart from a failed `init` or too many retries.
+        assert!(error.to_string().contains("apply failed in"));
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\n"
