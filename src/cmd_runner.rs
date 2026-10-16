@@ -649,6 +649,43 @@ esac
     }
 
     #[test]
+    fn apply_returns_error_when_cached_backend_configuration_is_invalid() {
+        let temp = Utf8TempDir::new().unwrap();
+        let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
+        fs_err::create_dir(temp.path().join(".terraform")).unwrap();
+        // Truncated, e.g. by an interrupted write, but it still contains the
+        // setting that makes init fail to decode it, so apply tries to fix it.
+        fs_err::write(
+            &backend_state_path,
+            r#"{"backend": {"type": "s3", "config": {"assume_role_duration_seconds": null,"#,
+        )
+        .unwrap();
+
+        let executable = temp.path().join("fake-terraform");
+        fs_err::write(&executable, FAKE_NEWER_TERRAFORM).unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should fail when the cached backend configuration is invalid");
+
+        // A corrupt cache only breaks this module, so apply must return an
+        // error instead of panicking, letting the caller ask whether to
+        // continue with the remaining modules. The message names the file
+        // the user has to fix.
+        let message = error.to_string();
+        assert!(message.contains(&format!("failed to parse {backend_state_path}")));
+        // Init doesn't run again, since the cached configuration wasn't updated.
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false -migrate-state\n"
+        );
+    }
+
+    #[test]
     fn apply_recovers_when_backend_configuration_changes_after_initialization() {
         let temp = Utf8TempDir::new().unwrap();
 
