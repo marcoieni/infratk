@@ -95,7 +95,7 @@ impl CmdRunner {
             let mut init_output = self.init_migrate_state(directory, command);
             if !init_output.status().success()
                 && output_contains(&init_output, BACKEND_CONFIG_DECODE_FAILED)
-                && remove_unset_cached_backend_settings(&cache_directory)
+                && remove_unset_cached_backend_settings(&cache_directory)?
             {
                 println!("Cached backend configuration updated; initializing {directory} again");
                 init_output = self.init_migrate_state(directory, command);
@@ -191,7 +191,8 @@ fn output_contains(output: &CmdOutput, message: &str) -> bool {
 }
 
 /// Remove the unset settings from the backend configurations that `init` cached in
-/// `cache_directory`. Returns whether any setting was removed.
+/// `cache_directory`. Returns whether any setting was removed, or an error if a
+/// cached configuration can't be read, parsed or written.
 ///
 /// Terraform can't decode a cached backend configuration that contains a setting
 /// its backend no longer supports, even if the setting is unset, e.g. the
@@ -199,9 +200,9 @@ fn output_contains(output: &CmdOutput, message: &str) -> bool {
 /// S3 backend. Terraform reads omitted settings as unset, so removing the unset
 /// settings doesn't change the cached configuration, which `init -migrate-state`
 /// needs to detect whether the state would move.
-fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
+fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> anyhow::Result<bool> {
     if !cache_directory.exists() {
-        return false;
+        return Ok(false);
     }
 
     let mut removed_settings = false;
@@ -211,15 +212,16 @@ fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
         .standard_filters(false)
         .build();
     for entry in walker {
-        let entry = entry.expect("invalid entry");
+        let entry = entry?;
         if !entry.path().ends_with(".terraform/terraform.tfstate") {
             continue;
         }
 
-        let path = Utf8Path::from_path(entry.path()).expect("non UTF-8 path");
-        let content = fs_err::read_to_string(path).unwrap();
-        let mut backend_state: serde_json::Value = serde_json::from_str(&content)
-            .unwrap_or_else(|error| panic!("failed to parse {path}: {error}"));
+        let path = Utf8Path::from_path(entry.path())
+            .with_context(|| format!("non UTF-8 path: {}", entry.path().display()))?;
+        let content = fs_err::read_to_string(path)?;
+        let mut backend_state: serde_json::Value =
+            serde_json::from_str(&content).with_context(|| format!("failed to parse {path}"))?;
         let Some(config) = backend_state
             .pointer_mut("/backend/config")
             .and_then(serde_json::Value::as_object_mut)
@@ -230,13 +232,13 @@ fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
         let settings_count = config.len();
         config.retain(|_, value| !value.is_null());
         if config.len() < settings_count {
-            let content = serde_json::to_string_pretty(&backend_state).unwrap();
-            fs_err::write(path, content).unwrap();
+            let content = serde_json::to_string_pretty(&backend_state)?;
+            fs_err::write(path, content)?;
             println!("Removed unset settings from the cached backend configuration {path}");
             removed_settings = true;
         }
     }
-    removed_settings
+    Ok(removed_settings)
 }
 
 #[cfg(all(test, unix))]
