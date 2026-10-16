@@ -10,8 +10,9 @@ Utility for managing Rust [simpleinfra](https://github.com/rust-lang/simpleinfra
   changes, using the updated remote reference as the comparison base. Ignores
   Markdown documentation changes when selecting affected modules. Reinitializes
   modules whose backend configuration changed, without migrating state.
-  Asks whether to continue with the remaining modules after you decline a
-  module's apply
+  Asks whether to continue with the remaining modules when a module's apply
+  doesn't succeed, e.g. because you declined it or Terraform failed, and lists
+  those modules at the end
 - Update Terragrunt states verifying that the changes don't edit the state
 - Run `plan` for every lockfile of a PR
 - Show the dependency graph of the modules
