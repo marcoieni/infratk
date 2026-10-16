@@ -1,9 +1,11 @@
+use std::process::ExitCode;
+
 use crate::{
     config::Config, dir::current_dir_is_simpleinfra, envirnoment::assert_aws_env_is_not_set, git,
     graph::ModulesGraph, grouped_dirs::GroupedDirs,
 };
 
-pub fn apply(config: &Config) {
+pub fn apply(config: &Config) -> ExitCode {
     let repo = git::repo();
     let git_root = git::git_root(&repo);
     std::env::set_current_dir(&git_root).expect("failed to switch to the repository root");
@@ -17,7 +19,7 @@ pub fn apply(config: &Config) {
     let changed_files = git::current_branch_changed_files(&repo);
     if changed_files.is_empty() {
         println!("No changes found on the current branch.");
-        return;
+        return ExitCode::SUCCESS;
     }
 
     println!("Files changed on the current branch:");
@@ -29,7 +31,7 @@ pub fn apply(config: &Config) {
     let affected_modules = graph.get_affected_modules_containing_lockfile(&changed_files);
     if affected_modules.is_empty() {
         println!("No Terraform or Terragrunt root modules are affected.");
-        return;
+        return ExitCode::SUCCESS;
     }
 
     println!("\nAffected root modules:");
@@ -38,5 +40,16 @@ pub fn apply(config: &Config) {
     }
     println!("\nTerraform/Terragrunt will show a plan and ask for confirmation for each module.");
 
-    GroupedDirs::new(&affected_modules).apply_all(config);
+    let failed_directories = GroupedDirs::new(&affected_modules).apply_all(config);
+    if failed_directories.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+
+    println!("\nApply didn't succeed in:");
+    for directory in &failed_directories {
+        println!("  {directory}");
+    }
+    // Fail even if the user chose to continue, so that scripts running
+    // `infratk apply` don't carry on as if every module was applied.
+    ExitCode::FAILURE
 }

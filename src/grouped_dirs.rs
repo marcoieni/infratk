@@ -5,7 +5,7 @@ use inquire::Confirm;
 
 use crate::{
     aws,
-    cmd_runner::{ApplyOutcome, CmdRunner, PlanOutcome},
+    cmd_runner::{CmdRunner, PlanOutcome},
     config::Config,
     dir::{self, current_dir_is_simpleinfra},
 };
@@ -95,27 +95,33 @@ impl GroupedDirs {
         output
     }
 
-    pub fn apply_all(&self, config: &Config) {
+    /// Returns the directories whose apply didn't succeed.
+    pub fn apply_all(&self, config: &Config) -> Vec<Utf8PathBuf> {
         let mut remaining_directories = self.directories.len();
+        let mut failed_directories = Vec::new();
         self.for_each_authenticated_directory(
             config,
             LoginPolicy::Reuse,
             |cmd_runner, tool, directory| {
                 remaining_directories -= 1;
-                let outcome = match tool {
+                let result = match tool {
                     Tool::Terraform => cmd_runner.terraform_apply(directory),
                     Tool::Terragrunt => cmd_runner.terragrunt_apply(directory),
                 };
-                if outcome == ApplyOutcome::Cancelled
-                    && remaining_directories > 0
-                    && !confirm_continue_after_cancelled_apply(directory, remaining_directories)
-                {
-                    println!("Skipping the remaining {remaining_directories} module(s).");
-                    return ControlFlow::Break(());
+                if let Err(error) = result {
+                    eprintln!("Error: {error:#}");
+                    failed_directories.push(directory.to_path_buf());
+                    if remaining_directories > 0
+                        && !confirm_continue_after_failed_apply(directory, remaining_directories)
+                    {
+                        println!("Skipping the remaining {remaining_directories} module(s).");
+                        return ControlFlow::Break(());
+                    }
                 }
                 ControlFlow::Continue(())
             },
         );
+        failed_directories
     }
 
     /// Run `operation` in every directory, logging into each account before its
@@ -222,12 +228,9 @@ impl GroupedDir {
     }
 }
 
-fn confirm_continue_after_cancelled_apply(
-    directory: &Utf8Path,
-    remaining_directories: usize,
-) -> bool {
+fn confirm_continue_after_failed_apply(directory: &Utf8Path, remaining_directories: usize) -> bool {
     Confirm::new(&format!(
-        "Apply cancelled in {directory}. Continue with the remaining {remaining_directories} module(s)?"
+        "Apply didn't succeed in {directory}. Continue with the remaining {remaining_directories} module(s)?"
     ))
     .with_default(true)
     .prompt()

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::{bail, ensure, Context as _};
 use camino::Utf8Path;
 use secrecy::SecretString;
 
@@ -8,15 +9,10 @@ use crate::{
     git,
 };
 
-/// What Terraform prints on stdout when the user doesn't approve the apply.
-const APPLY_CANCELLED: &str = "Apply cancelled.";
 const BACKEND_CONFIG_DECODE_FAILED: &str = "Failed to decode current backend config";
 const BACKEND_CONFIGURATION_CHANGED: &str = "Backend configuration changed";
 const BACKEND_INITIALIZATION_REQUIRED: &str = "Backend initialization required";
 const MAX_APPLY_RETRIES: usize = 2;
-/// What Terraform prints on stdout when releasing the state lock takes a while,
-/// e.g. with a remote backend, after the rest of its output.
-const RELEASING_STATE_LOCK: &str = "Releasing state lock. This may take a few moments...";
 
 #[derive(Debug, PartialEq)]
 enum BackendRecovery {
@@ -28,13 +24,6 @@ enum BackendRecovery {
 pub enum PlanOutcome {
     NoChanges,
     Changes(String),
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ApplyOutcome {
-    Applied,
-    /// The user didn't approve the apply.
-    Cancelled,
 }
 
 pub struct CmdRunner {
@@ -54,20 +43,23 @@ impl CmdRunner {
         self.plan(module, "terraform")
     }
 
-    pub fn terragrunt_apply(&self, state: &Utf8Path) -> ApplyOutcome {
+    pub fn terragrunt_apply(&self, state: &Utf8Path) -> anyhow::Result<()> {
         self.apply(state, "terragrunt", ".terragrunt-cache")
     }
 
-    pub fn terraform_apply(&self, module: &Utf8Path) -> ApplyOutcome {
+    pub fn terraform_apply(&self, module: &Utf8Path) -> anyhow::Result<()> {
         self.apply(module, "terraform", ".terraform")
     }
 
+    /// Run `apply`, initializing the backend and retrying if it needs it.
+    /// Any other failure, including the user not approving the apply, is
+    /// returned to the caller, which decides whether to continue.
     fn apply(
         &self,
         directory: &Utf8Path,
         command: &str,
         cache_directory_name: &str,
-    ) -> ApplyOutcome {
+    ) -> anyhow::Result<()> {
         let cache_directory = directory.join(cache_directory_name);
         for retry_count in 0..=MAX_APPLY_RETRIES {
             let output = Cmd::new(command, ["apply"])
@@ -75,25 +67,23 @@ impl CmdRunner {
                 .with_current_dir(directory)
                 .run_interactive_with_output();
             if output.status().success() {
-                return ApplyOutcome::Applied;
-            }
-            if is_apply_cancelled(output.stdout()) {
-                return ApplyOutcome::Cancelled;
+                return Ok(());
             }
 
             if retry_count == MAX_APPLY_RETRIES {
-                panic!("{command} apply failed after {MAX_APPLY_RETRIES} retries in {directory}");
+                bail!("{command} apply failed after {MAX_APPLY_RETRIES} retries in {directory}");
             }
 
-            let backend_recovery = backend_recovery(&output)
-                .unwrap_or_else(|| panic!("{command} apply failed in {directory}"));
+            let Some(backend_recovery) = backend_recovery(&output) else {
+                bail!("{command} apply failed in {directory}");
+            };
 
             match backend_recovery {
                 BackendRecovery::ConfigurationChanged => {
                     match fs_err::remove_dir_all(&cache_directory) {
                         Ok(()) => println!("Removed stale cache directory {cache_directory}"),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => panic!("failed to remove {cache_directory}: {error}"),
+                        Err(error) => bail!("failed to remove {cache_directory}: {error}"),
                     }
                     println!("Backend configuration changed; reinitializing {directory}");
                 }
@@ -105,28 +95,26 @@ impl CmdRunner {
             let mut init_output = self.init_migrate_state(directory, command);
             if !init_output.status().success()
                 && output_contains(&init_output, BACKEND_CONFIG_DECODE_FAILED)
-                && remove_unset_cached_backend_settings(&cache_directory)
+                && remove_unset_cached_backend_settings(&cache_directory)?
             {
                 println!("Cached backend configuration updated; initializing {directory} again");
                 init_output = self.init_migrate_state(directory, command);
             }
-            assert!(
+            ensure!(
                 init_output.status().success(),
                 "{command} init failed in {directory}"
             );
 
-            let git_status = git::working_tree_status(directory).unwrap_or_else(|error| {
-                panic!(
-                    "failed to verify the repository after {command} init in {directory}: {error}"
-                )
-            });
-            assert!(
+            let git_status = git::working_tree_status(directory).with_context(|| {
+                format!("failed to verify the repository after {command} init in {directory}")
+            })?;
+            ensure!(
                 git_status.is_empty(),
                 "{command} init left the repository dirty; refusing to retry {command} apply:\n{git_status}"
             );
         }
 
-        unreachable!("apply retry loop always returns or panics");
+        unreachable!("apply retry loop always returns");
     }
 
     /// Run `init` with `-migrate-state`, which lets it accept an edited backend block.
@@ -188,20 +176,6 @@ impl CmdRunner {
     }
 }
 
-/// Whether the user didn't approve the apply that printed `stdout`.
-///
-/// Check only the last line of stdout, because the plan printed before the prompt
-/// can contain the message too, e.g. in a file's content. Skip the line about
-/// releasing the state lock, which Terraform can print after the message.
-/// Match the end of the lines, because Terragrunt prints them after its log prefix.
-fn is_apply_cancelled(stdout: &str) -> bool {
-    stdout
-        .lines()
-        .rev()
-        .find(|line| !line.ends_with(RELEASING_STATE_LOCK))
-        .is_some_and(|line| line.ends_with(APPLY_CANCELLED))
-}
-
 fn backend_recovery(output: &CmdOutput) -> Option<BackendRecovery> {
     if output_contains(output, BACKEND_CONFIGURATION_CHANGED) {
         Some(BackendRecovery::ConfigurationChanged)
@@ -217,7 +191,8 @@ fn output_contains(output: &CmdOutput, message: &str) -> bool {
 }
 
 /// Remove the unset settings from the backend configurations that `init` cached in
-/// `cache_directory`. Returns whether any setting was removed.
+/// `cache_directory`. Returns whether any setting was removed, or an error if a
+/// cached configuration can't be read, parsed or written.
 ///
 /// Terraform can't decode a cached backend configuration that contains a setting
 /// its backend no longer supports, even if the setting is unset, e.g. the
@@ -225,9 +200,9 @@ fn output_contains(output: &CmdOutput, message: &str) -> bool {
 /// S3 backend. Terraform reads omitted settings as unset, so removing the unset
 /// settings doesn't change the cached configuration, which `init -migrate-state`
 /// needs to detect whether the state would move.
-fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
+fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> anyhow::Result<bool> {
     if !cache_directory.exists() {
-        return false;
+        return Ok(false);
     }
 
     let mut removed_settings = false;
@@ -237,15 +212,16 @@ fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
         .standard_filters(false)
         .build();
     for entry in walker {
-        let entry = entry.expect("invalid entry");
+        let entry = entry?;
         if !entry.path().ends_with(".terraform/terraform.tfstate") {
             continue;
         }
 
-        let path = Utf8Path::from_path(entry.path()).expect("non UTF-8 path");
-        let content = fs_err::read_to_string(path).unwrap();
-        let mut backend_state: serde_json::Value = serde_json::from_str(&content)
-            .unwrap_or_else(|error| panic!("failed to parse {path}: {error}"));
+        let path = Utf8Path::from_path(entry.path())
+            .with_context(|| format!("non UTF-8 path: {}", entry.path().display()))?;
+        let content = fs_err::read_to_string(path)?;
+        let mut backend_state: serde_json::Value =
+            serde_json::from_str(&content).with_context(|| format!("failed to parse {path}"))?;
         let Some(config) = backend_state
             .pointer_mut("/backend/config")
             .and_then(serde_json::Value::as_object_mut)
@@ -256,13 +232,13 @@ fn remove_unset_cached_backend_settings(cache_directory: &Utf8Path) -> bool {
         let settings_count = config.len();
         config.retain(|_, value| !value.is_null());
         if config.len() < settings_count {
-            let content = serde_json::to_string_pretty(&backend_state).unwrap();
-            fs_err::write(path, content).unwrap();
+            let content = serde_json::to_string_pretty(&backend_state)?;
+            fs_err::write(path, content)?;
             println!("Removed unset settings from the cached backend configuration {path}");
             removed_settings = true;
         }
     }
-    removed_settings
+    Ok(removed_settings)
 }
 
 #[cfg(all(test, unix))]
@@ -335,7 +311,9 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .unwrap();
 
         assert!(!cache_directory.exists());
         assert_eq!(
@@ -374,11 +352,9 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        CmdRunner::new(BTreeMap::new()).apply(
-            temp.path(),
-            executable.as_str(),
-            ".terragrunt-cache",
-        );
+        CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terragrunt-cache")
+            .unwrap();
 
         assert!(cache_directory.exists());
         assert_eq!(
@@ -430,7 +406,9 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .unwrap();
 
         // Keeping the cache preserves the providers, modules and selected workspace.
         assert!(cache_directory.exists());
@@ -498,19 +476,13 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        let result = std::panic::catch_unwind(|| {
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-        });
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should stop when the state would move");
 
         // Moving the state needs a manual migration, so apply must stop
         // before running against the new state.
-        let panic = result.expect_err("apply should stop when the state would move");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("init failed"));
+        assert!(error.to_string().contains("init failed"));
         // The cached backend settings are what lets init detect the state move
         // on the next run, so they must be left in place. Since init didn't fail
         // to decode them, the file must not even be rewritten.
@@ -591,7 +563,9 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .unwrap();
 
         // `init -migrate-state` compares the cached backend configuration with
         // the edited backend block to detect whether the state would move, so
@@ -624,11 +598,9 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        CmdRunner::new(BTreeMap::new()).apply(
-            temp.path(),
-            executable.as_str(),
-            ".terragrunt-cache",
-        );
+        CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terragrunt-cache")
+            .unwrap();
 
         let config = &read_json(&backend_state_path)["backend"]["config"];
         assert!(config.get("access_key").is_none());
@@ -657,20 +629,14 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        let result = std::panic::catch_unwind(|| {
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-        });
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should stop when the cached setting is set");
 
         // A setting that is set affects how Terraform reads the state of the
         // cached backend, so it must be kept and the user has to reinitialize
         // the backend manually, as Terraform's error explains.
-        let panic = result.expect_err("apply should stop when the cached setting is set");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("init failed"));
+        assert!(error.to_string().contains("init failed"));
         assert_eq!(
             read_json(&backend_state_path)["backend"]["config"]["assume_role_duration_seconds"],
             3600
@@ -679,6 +645,52 @@ esac
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\ninit -input=false -migrate-state\n"
+        );
+    }
+
+    #[test]
+    fn apply_returns_error_when_a_cached_backend_configuration_is_invalid() {
+        let temp = Utf8TempDir::new().unwrap();
+        // Terragrunt keeps every copy of the module it downloaded, e.g. before
+        // and after the module source changed, so its cache can hold stale
+        // copies besides the one Terraform runs in.
+        let current_directory = temp.path().join(".terragrunt-cache/abc/def/.terraform");
+        fs_err::create_dir_all(&current_directory).unwrap();
+        let legacy_state = legacy_backend_state(None).to_string();
+        fs_err::write(current_directory.join("terraform.tfstate"), &legacy_state).unwrap();
+        // When init fails to decode the current copy, apply parses the backend
+        // configuration of every copy, so it can meet a corrupt stale one.
+        let stale_directory = temp.path().join(".terragrunt-cache/abc/ghi/.terraform");
+        fs_err::create_dir_all(&stale_directory).unwrap();
+        let stale_backend_state_path = stale_directory.join("terraform.tfstate");
+        fs_err::write(
+            &stale_backend_state_path,
+            &legacy_state[..legacy_state.len() / 2],
+        )
+        .unwrap();
+
+        let executable = temp.path().join("fake-terragrunt");
+        fs_err::write(&executable, FAKE_NEWER_TERRAFORM).unwrap();
+        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&executable, permissions).unwrap();
+        commit_test_repository(temp.path());
+
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terragrunt-cache")
+            .expect_err("apply should fail when a cached backend configuration is invalid");
+
+        // A corrupt copy only breaks this module, so apply must return an
+        // error instead of panicking, letting the caller ask whether to
+        // continue with the remaining modules. The message names the file
+        // the user has to fix.
+        let message = error.to_string();
+        assert!(message.contains(&format!("failed to parse {stale_backend_state_path}")));
+        // Whichever copy apply parses first, it stops on the parse error
+        // instead of running init again.
+        assert_eq!(
+            fs_err::read_to_string(temp.path().join("calls")).unwrap(),
+            "apply\ninit -input=false -migrate-state\n"
         );
     }
 
@@ -720,7 +732,9 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .unwrap();
 
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
@@ -754,17 +768,11 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        let result = std::panic::catch_unwind(|| {
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-        });
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should stop after two retries");
 
-        let panic = result.expect_err("apply should stop after two retries");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("apply failed after 2 retries"));
+        assert!(error.to_string().contains("apply failed after 2 retries"));
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\napply\ninit -input=false -migrate-state\napply\n"
@@ -798,16 +806,11 @@ esac
         fs_err::set_permissions(&executable, permissions).unwrap();
         commit_test_repository(temp.path());
 
-        let result = std::panic::catch_unwind(|| {
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-        });
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should abort when init changes the repository");
 
-        let panic = result.expect_err("apply should abort when init changes the repository");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
+        let message = error.to_string();
         assert!(message.contains("init left the repository dirty"));
         assert!(message.contains(".terraform.lock.hcl"));
         assert_eq!(
@@ -817,11 +820,11 @@ esac
     }
 
     #[test]
-    fn apply_reports_cancellation_without_retrying() {
+    fn apply_does_not_retry_when_the_user_declines() {
         let temp = Utf8TempDir::new().unwrap();
 
         // Mimics Terraform when the user doesn't answer "yes" to the
-        // confirmation prompt: it prints the message on stdout and exits with 1.
+        // confirmation prompt: it exits with 1 without reporting a backend error.
         let executable = temp.path().join("fake-terraform");
         fs_err::write(
             &executable,
@@ -841,108 +844,18 @@ exit 1
         // write handle, see rust-lang/rust#114554.
         commit_test_repository(temp.path());
 
-        let outcome =
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
+        let error = CmdRunner::new(BTreeMap::new())
+            .apply(temp.path(), executable.as_str(), ".terraform")
+            .expect_err("apply should fail when the user declines");
 
-        // The user chose not to apply, so this isn't a failure to recover from
-        // with `init`: apply must run once and let the caller decide what's next.
-        assert_eq!(outcome, ApplyOutcome::Cancelled);
+        // Only backend errors can be fixed by running `init`, so any other
+        // failure must be returned after a single apply, letting the caller
+        // ask whether to continue with the remaining modules. The message
+        // tells this failure apart from a failed `init` or too many retries.
+        assert!(error.to_string().contains("apply failed in"));
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\n"
         );
-    }
-
-    #[test]
-    fn apply_fails_when_only_the_plan_contains_the_cancellation_message() {
-        let temp = Utf8TempDir::new().unwrap();
-
-        // Mimics Terraform when the user approves an apply that then fails, and
-        // the plan printed before the prompt contains the cancellation message
-        // as an attribute value, e.g. the content of a file.
-        let executable = temp.path().join("fake-terraform");
-        fs_err::write(
-            &executable,
-            r#"#!/bin/sh
-cat <<'EOF'
-  # local_file.notice will be created
-  + resource "local_file" "notice" {
-      + content = "Apply cancelled."
-    }
-
-Do you want to perform these actions?
-
-local_file.notice: Creating...
-EOF
-printf 'Error: failed to create local file\n' >&2
-exit 1
-"#,
-        )
-        .unwrap();
-        let mut permissions = fs_err::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs_err::set_permissions(&executable, permissions).unwrap();
-        // Avoids "Text file busy", see `apply_reports_cancellation_without_retrying`.
-        commit_test_repository(temp.path());
-
-        let result = std::panic::catch_unwind(|| {
-            CmdRunner::new(BTreeMap::new()).apply(temp.path(), executable.as_str(), ".terraform");
-        });
-
-        // Reporting a cancellation would let the user continue with the next
-        // modules, even though this one failed.
-        let panic = result.expect_err("apply should fail instead of reporting a cancellation");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .unwrap();
-        assert!(message.contains("apply failed in"));
-    }
-
-    #[test]
-    fn apply_is_cancelled_when_releasing_the_state_lock_is_slow() {
-        // Mimics Terraform with a remote backend, e.g. S3: when releasing the
-        // state lock takes a while, it prints that it's doing so on stdout after
-        // the cancellation message.
-        let stdout = "Apply cancelled.
-Releasing state lock. This may take a few moments...";
-
-        assert!(is_apply_cancelled(stdout));
-    }
-
-    #[test]
-    fn apply_is_cancelled_when_terragrunt_prefixes_the_output() {
-        // Terragrunt prints each line of Terraform's stdout after its log prefix,
-        // so neither message is a whole line.
-        let stdout = "12:00:00.000 STDOUT terraform: Apply cancelled.
-12:00:00.500 STDOUT terraform: Releasing state lock. This may take a few moments...";
-
-        assert!(is_apply_cancelled(stdout));
-    }
-
-    #[test]
-    fn apply_is_not_cancelled_when_a_line_of_the_plan_ends_with_the_cancellation_message() {
-        // Mimics Terraform when the user approves an apply that then fails, and
-        // the plan printed before the prompt contains the cancellation message
-        // on its own line, e.g. in the content of a file.
-        let stdout = r#"Terraform will perform the following actions:
-
-  # local_file.notice will be created
-  + resource "local_file" "notice" {
-      + content  = <<-EOT
-            Apply cancelled.
-        EOT
-      + filename = "notice.txt"
-    }
-
-Do you want to perform these actions?
-
-local_file.notice: Creating...
-Releasing state lock. This may take a few moments..."#;
-
-        // Reporting a cancellation would let the user continue with the next
-        // modules, even though this one failed.
-        assert!(!is_apply_cancelled(stdout));
     }
 }

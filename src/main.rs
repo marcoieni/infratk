@@ -15,18 +15,20 @@ mod pretty_format;
 mod provider;
 mod select;
 
+use std::process::ExitCode;
+
 use args::CliArgs;
 use clap::Parser as _;
 
 const LOCKFILE: &str = ".terraform.lock.hcl";
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     log::init(true);
     let args = CliArgs::parse();
     let config = config::parse_config().unwrap();
     match args.command {
-        args::Command::Apply => command::apply::apply(&config),
+        args::Command::Apply => return command::apply::apply(&config),
         args::Command::Upgrade(args) => command::upgrade::upgrade(&args, &config),
         args::Command::PlanPr(args) => command::plan_pr::plan_pr(&args, &config),
         args::Command::UpgradeProvider => {
@@ -37,4 +39,5 @@ async fn main() {
         args::Command::Cd => command::cd_cmd::cd(&config),
         args::Command::Graph(args) => command::graph_cmd::print_graph(args).await,
     }
+    ExitCode::SUCCESS
 }
