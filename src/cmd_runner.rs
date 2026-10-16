@@ -653,8 +653,9 @@ esac
         let temp = Utf8TempDir::new().unwrap();
         let backend_state_path = temp.path().join(".terraform/terraform.tfstate");
         fs_err::create_dir(temp.path().join(".terraform")).unwrap();
-        // Truncated, e.g. by an interrupted write, but it still contains the
-        // setting that makes init fail to decode it, so apply tries to fix it.
+        // When init fails to decode the cached backend configuration, apply
+        // parses every copy, so it can meet a corrupt stale one in a Terragrunt
+        // cache. The fake's init just greps for the setting, so it still fails.
         fs_err::write(
             &backend_state_path,
             r#"{"backend": {"type": "s3", "config": {"assume_role_duration_seconds": null,"#,
@@ -678,7 +679,7 @@ esac
         // the user has to fix.
         let message = error.to_string();
         assert!(message.contains(&format!("failed to parse {backend_state_path}")));
-        // Init doesn't run again, since the cached configuration wasn't updated.
+        // Apply stops on the parse error instead of running init again.
         assert_eq!(
             fs_err::read_to_string(temp.path().join("calls")).unwrap(),
             "apply\ninit -input=false -migrate-state\n"
