@@ -1,42 +1,11 @@
 use std::process::ExitCode;
 
-use crate::{
-    config::Config, dir::current_dir_is_simpleinfra, envirnoment::assert_aws_env_is_not_set, git,
-    graph::ModulesGraph, grouped_dirs::GroupedDirs,
-};
+use crate::{command::current_branch, config::Config, grouped_dirs::GroupedDirs};
 
 pub fn apply(config: &Config) -> ExitCode {
-    let repo = git::repo();
-    let git_root = git::git_root(&repo);
-    std::env::set_current_dir(&git_root).expect("failed to switch to the repository root");
-
-    assert!(
-        current_dir_is_simpleinfra(),
-        "infratk apply must be run from the simpleinfra repository"
-    );
-    assert_aws_env_is_not_set();
-
-    let changed_files = git::current_branch_changed_files(&repo);
-    if changed_files.is_empty() {
-        println!("No changes found on the current branch.");
-        return ExitCode::SUCCESS;
-    }
-
-    println!("Files changed on the current branch:");
-    for file in &changed_files {
-        println!("  {file}");
-    }
-
-    let graph = ModulesGraph::new(None);
-    let affected_modules = graph.get_affected_modules_containing_lockfile(&changed_files);
+    let affected_modules = current_branch::affected_modules("apply");
     if affected_modules.is_empty() {
-        println!("No Terraform or Terragrunt root modules are affected.");
         return ExitCode::SUCCESS;
-    }
-
-    println!("\nAffected root modules:");
-    for module in &affected_modules {
-        println!("  {module}");
     }
     println!("\nTerraform/Terragrunt will show a plan and ask for confirmation for each module.");
 
