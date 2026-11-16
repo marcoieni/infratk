@@ -28,9 +28,13 @@ enum Tool {
     Terragrunt,
 }
 
+/// How to log into each AWS account before running commands in it.
 #[derive(Clone, Copy)]
-enum LoginPolicy {
+pub enum LoginPolicy {
+    /// Log out of AWS SSO, then log in again.
     Fresh,
+    /// Reuse valid cached SSO credentials, logging in only when they're invalid.
+    /// The legacy account always gets new credentials.
     Reuse,
 }
 
@@ -55,11 +59,15 @@ impl GroupedDirs {
         Self { directories }
     }
 
-    pub fn plan_all(&self, config: &Config) -> Vec<(Utf8PathBuf, PlanOutcome)> {
+    pub fn plan_all(
+        &self,
+        config: &Config,
+        login_policy: LoginPolicy,
+    ) -> Vec<(Utf8PathBuf, PlanOutcome)> {
         let mut output = Vec::new();
         self.for_each_authenticated_directory(
             config,
-            LoginPolicy::Fresh,
+            login_policy,
             |cmd_runner, tool, directory| {
                 let outcome = match tool {
                     Tool::Terraform => cmd_runner.terraform_plan(directory),

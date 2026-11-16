@@ -13,6 +13,9 @@ pub struct CliArgs {
 pub enum Command {
     /// Apply changes from the current branch to every affected module.
     Apply,
+    /// Plan changes from the current branch on every affected module, without
+    /// applying them or asking for confirmation.
+    Plan(PlanArgs),
     /// Upgrade terragrunt states or Terraform modules.
     Upgrade(UpgradeArgs),
     /// Given a PR, run terragrunt/terraform plan on every module that changed.
@@ -40,6 +43,13 @@ pub struct UpgradeArgs {
     /// detected by git as untracked changes.
     #[arg(long)]
     pub git: bool,
+    /// If true, copy the output to the clipboard.
+    #[arg(long)]
+    pub clipboard: bool,
+}
+
+#[derive(clap::Parser, Debug)]
+pub struct PlanArgs {
     /// If true, copy the output to the clipboard.
     #[arg(long)]
     pub clipboard: bool,

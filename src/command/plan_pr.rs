@@ -1,9 +1,15 @@
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::{
-    args::PlanPr, clipboard, cmd::Cmd, cmd_runner::PlanOutcome, config::Config,
-    dir::current_dir_is_simpleinfra, git::assert_current_branch_is_same_as_pr,
-    grouped_dirs::GroupedDirs, pretty_format, LOCKFILE,
+    args::PlanPr,
+    clipboard,
+    cmd::Cmd,
+    cmd_runner::PlanOutcome,
+    config::Config,
+    dir::current_dir_is_simpleinfra,
+    git::assert_current_branch_is_same_as_pr,
+    grouped_dirs::{GroupedDirs, LoginPolicy},
+    pretty_format, LOCKFILE,
 };
 
 pub fn plan_pr(args: &PlanPr, config: &Config) {
@@ -26,7 +32,7 @@ pub fn plan_pr(args: &PlanPr, config: &Config) {
 }
 
 fn plan_directories(directories: &[&Utf8Path], config: &Config) -> Vec<(Utf8PathBuf, PlanOutcome)> {
-    GroupedDirs::new(directories).plan_all(config)
+    GroupedDirs::new(directories).plan_all(config, LoginPolicy::Fresh)
 }
 
 fn get_files_changes(pr: &str) -> Vec<Utf8PathBuf> {

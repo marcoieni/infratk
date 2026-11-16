@@ -14,6 +14,10 @@ Utility for managing Rust [simpleinfra](https://github.com/rust-lang/simpleinfra
   doesn't succeed, e.g. because you declined it or Terraform failed. Lists the
   modules whose apply didn't succeed at the end of the run, then exits with a
   non-zero status
+- Run `plan` for every Terraform/Terragrunt root module affected by the current
+  branch's changes, selecting the same modules as `apply` but never applying
+  them or asking for confirmation. Prints a summary and the plan of each module
+  with changes. Use `--clipboard` to copy the output
 - Update Terragrunt states verifying that the changes don't edit the state
 - Run `plan` for every lockfile of a PR
 - Show the dependency graph of the modules
